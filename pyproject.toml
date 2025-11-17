@@ -6,7 +6,7 @@ requires = ["hatchling", "versioningit"]
 dev = [
   "genbadge[coverage,tests]",
   "git-changelog",
-  "mike",
+  "mike>=2.0.0",
   "mkdocs-git-revision-date-localized-plugin",
   "mkdocs-macros-plugin",
   "mkdocs-material",
