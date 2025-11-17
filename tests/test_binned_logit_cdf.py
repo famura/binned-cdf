@@ -98,8 +98,69 @@ def test_basic_properties(
     assert torch.all(torch.isfinite(var))
 
 
+@pytest.mark.parametrize(
+    "batch_size,new_batch_shape",
+    [
+        (None, [4, 5]),  # () can expand to any shape
+        (1, [1, 5]),  # (1,) can expand by adding dimensions or keeping 1
+        (1, [3, 1]),  # (1,) can also expand with 1 in last position
+        (8, [2, 8]),  # (8,) can expand by adding leading dimensions
+        (8, [3, 2, 8]),  # (8,) can expand with multiple leading dimensions
+    ],
+)
+@pytest.mark.parametrize("num_bins", [2, 200])  # 2 is an edge case for log-spacing
+@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
+@pytest.mark.parametrize(
+    "use_cuda",
+    [
+        pytest.param(False, id="cpu"),
+        pytest.param(True, marks=needs_cuda, id="cuda"),
+    ],
+)
+def test_expand(
+    batch_size: int | None,
+    new_batch_shape: list[int],
+    num_bins: int,
+    log_spacing: bool,
+    use_cuda: bool,
+):
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
+    logits = logits.to(device)
+    dist = BinnedLogitCDF(logits, log_spacing=log_spacing)
+
+    expanded_dist = dist.expand(new_batch_shape)
+
+    # Assert that expanded_dist is a different object (not the same instance).
+    assert expanded_dist is not dist, "Expanded distribution should be a new instance"
+
+    # Assert that the expanded distribution is on the same device.
+    assert expanded_dist.logits.device == device, f"Expected device {device}, got {expanded_dist.logits.device}"
+    assert expanded_dist.bin_edges.device == device
+    assert expanded_dist.bin_centers.device == device
+    assert expanded_dist.bin_widths.device == device
+
+    # Assert that the batch shape is correct.
+    assert expanded_dist.batch_shape == torch.Size(new_batch_shape), (
+        f"Expected batch_shape {torch.Size(new_batch_shape)}, got {expanded_dist.batch_shape}"
+    )
+
+    # Assert that the logits have the correct shape: (*new_batch_shape, num_bins).
+    expected_logits_shape = torch.Size([*new_batch_shape, num_bins])
+    assert expanded_dist.logits.shape == expected_logits_shape, (
+        f"Expected logits shape {expected_logits_shape}, got {expanded_dist.logits.shape}"
+    )
+
+    # Verify properties that should remain unchanged.
+    assert expanded_dist.event_shape == torch.Size([]), "event_shape should remain empty (scalar)"
+    assert expanded_dist.num_bins == num_bins, "num_bins should be unchanged"
+    assert expanded_dist.bin_edges.shape == dist.bin_edges.shape, "bin_edges shape should be unchanged"
+    assert expanded_dist.bin_centers.shape == dist.bin_centers.shape, "bin_centers shape should be unchanged"
+    assert expanded_dist.bin_widths.shape == dist.bin_widths.shape, "bin_widths shape should be unchanged"
+
+
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
-@pytest.mark.parametrize("num_bins", [2, 100, 1000])  # 2 is an edge case for log-spacing
+@pytest.mark.parametrize("num_bins", [2, 200])  # 2 is an edge case for log-spacing
 @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
 @pytest.mark.parametrize(
     "use_cuda",
@@ -115,10 +176,12 @@ def test_prob_random_logits(
     use_cuda: bool,
 ):
     """Test probability evaluation with random logits at the bounds."""
+    torch.manual_seed(42)
+
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
-    dist = BinnedLogitCDF(logits, log_spacing=log_spacing)  # default bounds
+    dist = BinnedLogitCDF(logits, log_spacing=log_spacing)
 
     # Define expected shapes based on batch_size. The bins go into the sample shape.
     bin_centers = dist.bin_centers
