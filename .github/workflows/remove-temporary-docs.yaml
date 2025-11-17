@@ -20,6 +20,9 @@ jobs:
             - name: Set up uv
               uses: astral-sh/setup-uv@v7
 
+            - name: Configure Git
+              uses: ./.github/actions/configure-git
+
             - name: Remove temporary docs
               run: |
                   VERSION=next-pr-${{ github.event.number }}
