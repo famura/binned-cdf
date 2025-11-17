@@ -145,14 +145,6 @@ def test_prob_random_logits(
     assert prob_at_low.shape == expected_scalar_shape
     assert prob_at_up.shape == expected_scalar_shape
 
-    # Test probability outside bounds should be very small (log_prob very negative)
-    # if dist.bound_low > -1e6:  # Only test if lower bound is finite enough
-    #     prob_below = dist.log_prob(torch.tensor(dist.bound_low - 10.0, device=device))
-    #     assert torch.all(prob_below < -5), "log_prob below lower bound should be very negative"
-    # if dist.bound_up < 1e6:  # Only test if upper bound is finite enough
-    #     prob_above = dist.log_prob(torch.tensor(dist.bound_up + 10.0, device=device))
-    #     assert torch.all(prob_above < -5), "log_prob above upper bound should be very negative"
-
 
 @pytest.mark.parametrize("logit_scale", [1e-3, 1, 1e3, 1e9])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
