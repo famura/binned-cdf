@@ -22,6 +22,14 @@ dev = [
   "seaborn>=0.13.2",
   "scipy>=1.16.3",
 ]
+examples = [
+  "scikit-learn>=1.7.2",
+]
+
+[project.optional-dependencies]
+examples = [
+  "scikit-learn>=1.7.2",
+]
 
 [project]
 authors = [{name = "Fabio Muratore", email = "accounts@famura.net"}]

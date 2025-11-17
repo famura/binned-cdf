@@ -1,9 +1,9 @@
-# Byte-compiled / optimized / DLL files
+# byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 
-# Distribution / packaging
+# distribution / packaging
 .Python
 env/
 build/
@@ -15,13 +15,13 @@ sdist/
 *.egg-info/
 *.egg
 
-# Pytest / coverage reports
+# pytest / coverage reports
 .coverage
 coverage.xml
 pytest.xml
 tests/results/
 
-# Environment
+# environment
 /.venv/
 
 # PyCharm
@@ -38,3 +38,6 @@ tests/results/
 
 # uv
 uv.lock
+
+# results from examples
+examples/*.png
