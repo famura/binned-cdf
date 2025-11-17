@@ -98,8 +98,8 @@ class BinnedLogitCDF(Distribution):
 
             # Create positive side: 0, internal edges, bound_up.
             if half_bins == 1:
-                # Special case: only boundary edges.
-                positive_edges = torch.tensor([0.0, bound_up])
+                # Special case where we only use the boundary edges.
+                positive_edges = torch.tensor([bound_up])
             else:
                 # Create half_bins - 1 internal edges between 0 and bound_up.
                 internal_positive = torch.logspace(
@@ -141,7 +141,7 @@ class BinnedLogitCDF(Distribution):
         return self.bin_edges.shape[0]
 
     @property
-    def probs(self) -> torch.Tensor:
+    def bin_probs(self) -> torch.Tensor:
         """Get normalized probabilities for each bin, of shape (*batch_shape, num_bins)."""
         raw_probs = torch.sigmoid(self.logits)  # shape: (*batch_shape, num_bins)
         return raw_probs / raw_probs.sum(dim=-1, keepdim=True)
@@ -149,17 +149,14 @@ class BinnedLogitCDF(Distribution):
     @property
     def mean(self) -> torch.Tensor:
         """Compute mean of the distribution, i.e., the weighted average of bin centers, of shape (*batch_size,)."""
-        bin_probs = self.probs
-        weighted_centers = bin_probs * self.bin_centers  # shape: (*batch_shape, num_bins)
+        weighted_centers = self.bin_probs * self.bin_centers  # shape: (*batch_shape, num_bins)
         return torch.sum(weighted_centers, dim=-1)
 
     @property
     def variance(self) -> torch.Tensor:
         """Compute variance of the distribution, of shape (*batch_shape,)."""
-        bin_probs = self.probs
-
         # E[X^2] = weighted squared bin centers.
-        weighted_centers_sq = bin_probs * (self.bin_centers**2)  # shape: (*batch_shape, num_bins)
+        weighted_centers_sq = self.bin_probs * (self.bin_centers**2)  # shape: (*batch_shape, num_bins)
         second_moment = torch.sum(weighted_centers_sq, dim=-1)  # shape: (*batch_shape,)
 
         # Var = E[X^2] - E[X]^2
@@ -189,7 +186,16 @@ class BinnedLogitCDF(Distribution):
         )
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        """Compute log probability density at given values."""
+        """Compute log probability density at given values.
+
+        Args:
+            value: Values at which to compute the log PDF.
+                Expected shape: (*sample_shape, *batch_shape) or broadcastable to it.
+
+        Returns:
+            Log PDF values corresponding to the input values.
+            Output shape: same as `value` shape after broadcasting, i.e., (*sample_shape, *batch_shape).
+        """
         return torch.log(self.prob(value) + 1e-8)  # small epsilon for stability
 
     def prob(self, value: torch.Tensor) -> torch.Tensor:
@@ -218,7 +224,7 @@ class BinnedLogitCDF(Distribution):
         bin_edges_left = bin_edges_left.view((1,) * num_sample_dims + bin_edges_left.shape)
         bin_edges_right = bin_edges_right.view((1,) * num_sample_dims + bin_edges_right.shape)
         bin_widths = self.bin_widths.view((1,) * num_sample_dims + self.bin_widths.shape)
-        probs = self.probs.view((1,) * num_sample_dims + self.probs.shape)
+        probs = self.bin_probs.view((1,) * num_sample_dims + self.bin_probs.shape)
 
         # Add bin dimension to value for broadcasting.
         value_expanded = value.unsqueeze(-1)  # shape: (*sample_shape, *batch_shape, 1)
@@ -263,7 +269,7 @@ class BinnedLogitCDF(Distribution):
 
         # Prepend singleton dimensions for sample_shape to probs.
         # probs: (*batch_shape, num_bins) -> (*sample_shape, *batch_shape, num_bins)
-        probs_expanded = self.probs.view((1,) * num_sample_dims + self.probs.shape)
+        probs_expanded = self.bin_probs.view((1,) * num_sample_dims + self.bin_probs.shape)
 
         # Add the bin dimension to the input which is used for comparing with the bin centers.
         value_expanded = value.unsqueeze(-1)  # shape: (*sample_shape, *batch_shape, 1)
@@ -294,7 +300,7 @@ class BinnedLogitCDF(Distribution):
         cdf_edges = torch.cat(
             [
                 torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device),
-                torch.cumsum(self.probs, dim=-1),  # shape: (*batch_shape, num_bins)
+                torch.cumsum(self.bin_probs, dim=-1),  # shape: (*batch_shape, num_bins)
             ],
             dim=-1,
         )  # shape: (*batch_shape, num_bins + 1)
@@ -362,7 +368,7 @@ class BinnedLogitCDF(Distribution):
         Note:
             Here, we are doing an approximation by treating each bin as a uniform distribution over its width.
         """
-        bin_probs = self.probs
+        bin_probs = self.bin_probs
 
         # Get the PDF values at bin centers.
         pdf_values = bin_probs / self.bin_widths  # shape: (*batch_shape, num_bins)

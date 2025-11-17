@@ -47,7 +47,7 @@ def test_basic_properties(
         with pytest.raises(ValueError, match="log_spacing requires even number of bins"):
             BinnedLogitCDF(logits, bound_low, bound_up, log_spacing=log_spacing)
         return
-    dist = BinnedLogitCDF(logits, bound_low, bound_up)
+    dist = BinnedLogitCDF(logits, bound_low, bound_up, log_spacing=log_spacing)
 
     # Test that tensors are on the correct device.
     assert dist.logits.device == device
@@ -76,14 +76,14 @@ def test_basic_properties(
     assert "BinnedLogitCDF" in repr_str
 
     # Test that probabilities are valid. They should be normalized, and sum to 1.
-    probs = dist.probs
+    probs = dist.bin_probs
     assert probs.device == device
     assert torch.all(probs >= 0)
     assert torch.all(probs <= 1)
     assert torch.allclose(probs.sum(dim=-1), torch.ones(dist.batch_shape, device=device))
 
     # The probabilities should also be deterministic.
-    probs2 = dist.probs
+    probs2 = dist.bin_probs
     assert torch.allclose(probs, probs2)
 
     # Test that mean and variance have the correct shape and are finite.
@@ -96,6 +96,62 @@ def test_basic_properties(
     assert torch.all(torch.isfinite(mean))
     assert torch.all(var >= 0)
     assert torch.all(torch.isfinite(var))
+
+
+@pytest.mark.parametrize("batch_size", [None, 1, 8])
+@pytest.mark.parametrize("num_bins", [2, 100, 1000])  # 2 is an edge case for log-spacing
+@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
+@pytest.mark.parametrize(
+    "use_cuda",
+    [
+        pytest.param(False, id="cpu"),
+        pytest.param(True, marks=needs_cuda, id="cuda"),
+    ],
+)
+def test_prob_random_logits(
+    batch_size: int | None,
+    num_bins: int,
+    log_spacing: bool,
+    use_cuda: bool,
+):
+    """Test probability evaluation with random logits at the bounds."""
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
+    logits = logits.to(device)
+    dist = BinnedLogitCDF(logits, log_spacing=log_spacing)  # default bounds
+
+    # Define expected shapes based on batch_size. The bins go into the sample shape.
+    bin_centers = dist.bin_centers
+    if batch_size is not None:
+        # Expand to (num_bins, batch_size) for batched distributions.
+        bin_centers = bin_centers.unsqueeze(1).expand(num_bins, batch_size)
+        expected_probs_shape = (num_bins, batch_size)
+    else:
+        # Keep as (num_bins,) for non-batched distributions.
+        expected_probs_shape = (num_bins,)
+
+    # Test probability computation at bin centers.
+    probs_at_centers = dist.log_prob(bin_centers)
+    assert probs_at_centers.device == device
+    assert torch.all(torch.isfinite(probs_at_centers)), "log_prob at bin centers should be finite"
+    assert probs_at_centers.shape == expected_probs_shape
+
+    # Test probability at bounds - should be finite but may be low
+    expected_scalar_shape = torch.Size([]) if batch_size is None else torch.Size([batch_size])
+    prob_at_low = dist.log_prob(torch.tensor(dist.bound_low, device=device))
+    prob_at_up = dist.log_prob(torch.tensor(dist.bound_up, device=device))
+    assert torch.all(torch.isfinite(prob_at_low)), f"log_prob at lower bound should be finite: {prob_at_low}"
+    assert torch.all(torch.isfinite(prob_at_up)), f"log_prob at upper bound should be finite: {prob_at_up}"
+    assert prob_at_low.shape == expected_scalar_shape
+    assert prob_at_up.shape == expected_scalar_shape
+
+    # Test probability outside bounds should be very small (log_prob very negative)
+    # if dist.bound_low > -1e6:  # Only test if lower bound is finite enough
+    #     prob_below = dist.log_prob(torch.tensor(dist.bound_low - 10.0, device=device))
+    #     assert torch.all(prob_below < -5), "log_prob below lower bound should be very negative"
+    # if dist.bound_up < 1e6:  # Only test if upper bound is finite enough
+    #     prob_above = dist.log_prob(torch.tensor(dist.bound_up + 10.0, device=device))
+    #     assert torch.all(prob_above < -5), "log_prob above upper bound should be very negative"
 
 
 @pytest.mark.parametrize("logit_scale", [1e-3, 1, 1e3, 1e9])
