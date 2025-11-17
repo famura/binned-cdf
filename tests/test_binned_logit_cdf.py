@@ -188,10 +188,10 @@ def test_prob_random_logits(
     if batch_size is not None:
         # Expand to (num_bins, batch_size) for batched distributions.
         bin_centers = bin_centers.unsqueeze(1).expand(num_bins, batch_size)
-        expected_probs_shape = (num_bins, batch_size)
+        expected_probs_shape: tuple[int, ...] = (num_bins, batch_size)
     else:
         # Keep as (num_bins,) for non-batched distributions.
-        expected_probs_shape = (num_bins,)
+        expected_probs_shape: tuple[int, ...] = (num_bins,)  # type: ignore[no-redef]
 
     # Test probability computation at bin centers.
     probs_at_centers = dist.log_prob(bin_centers)
