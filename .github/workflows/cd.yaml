@@ -91,6 +91,8 @@ jobs:
         steps:
             - name: Check out repository
               uses: actions/checkout@v5
+              with:
+                  fetch-depth: 0 # it is necessary for versioningit to get full git history
 
             - name: Set up uv
               uses: astral-sh/setup-uv@v7
