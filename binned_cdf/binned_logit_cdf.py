@@ -148,7 +148,7 @@ class BinnedLogitCDF(Distribution):
 
     @property
     def mean(self) -> torch.Tensor:
-        """Compute mean of the distribution, i.e., the weighted average of bin centers, of shape (*batch_size,)."""
+        """Compute mean of the distribution, i.e., the weighted average of bin centers, of shape (*batch_shape,)."""
         weighted_centers = self.bin_probs * self.bin_centers  # shape: (*batch_shape, num_bins)
         return torch.sum(weighted_centers, dim=-1)
 
@@ -354,7 +354,7 @@ class BinnedLogitCDF(Distribution):
             sample_shape: Shape of the samples to draw.
 
         Returns:
-            Samples of shape [sample_shape + batch_shape, num_bins].
+            Samples of shape (sample_shape + batch_shape), where batch_shape is the batch shape of the distribution.
         """
         shape = torch.Size(sample_shape) + self.batch_shape
         uniform_samples = torch.rand(shape, dtype=self.logits.dtype, device=self.logits.device)
