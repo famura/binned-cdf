@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://famura.github.io/binned-cdf/latest/</loc>
+         <lastmod>2025-11-17</lastmod>
+    </url>
+    <url>
+         <loc>https://famura.github.io/binned-cdf/latest/changelog/</loc>
+         <lastmod>2025-11-17</lastmod>
+    </url>
+    <url>
+         <loc>https://famura.github.io/binned-cdf/latest/glossary/</loc>
+         <lastmod>2025-11-17</lastmod>
+    </url>
+    <url>
+         <loc>https://famura.github.io/binned-cdf/latest/installation/</loc>
+         <lastmod>2025-11-17</lastmod>
+    </url>
+    <url>
+         <loc>https://famura.github.io/binned-cdf/latest/licenses/</loc>
+         <lastmod>2025-11-17</lastmod>
+    </url>
+    <url>
+         <loc>https://famura.github.io/binned-cdf/latest/reference/</loc>
+         <lastmod>2025-11-17</lastmod>
+    </url>
+    <url>
+         <loc>https://famura.github.io/binned-cdf/latest/development/getting_started/</loc>
+         <lastmod>2025-11-17</lastmod>
+    </url>
+    <url>
+         <loc>https://famura.github.io/binned-cdf/latest/development/installation/</loc>
+         <lastmod>2025-11-17</lastmod>
+    </url>
+</urlset>
