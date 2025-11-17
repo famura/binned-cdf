@@ -1,0 +1,40 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+env/
+build/
+develop-eggs/
+dist/
+eggs/
+.eggs/
+sdist/
+*.egg-info/
+*.egg
+
+# Pytest / coverage reports
+.coverage
+coverage.xml
+pytest.xml
+tests/results/
+
+# Environment
+/.venv/
+
+# PyCharm
+.idea/
+
+# vscode
+/.vscode/
+
+# mkdocs
+/.site/
+
+# macOS
+.DS_store
+
+# uv
+uv.lock
