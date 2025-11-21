@@ -1,6 +1,6 @@
 # binned-cdf
 
-[![License: MIT][license-badge]][license-url]
+[![License: CC-BY-4.0][license-badge]][license-url]
 ![python][python-badge]<space>
 [![Docs][docs-badge]][docs]
 [![CI][ci-badge]][ci]
