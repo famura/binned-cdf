@@ -65,7 +65,7 @@ The bins can be initialized linearly or log-spaced.
 [pre-commit]: https://github.com/pre-commit/pre-commit
 [pytest-badge]: https://img.shields.io/badge/Pytest-green?logo=pytest
 [pytest]: https://github.com/pytest-dev/pytest
-[python-badge]: https://img.shields.io/badge/python-3.11%20|3.12%20|%203.11-informational?logo=python&logoColor=ffdd54
+[python-badge]: https://img.shields.io/badge/python-3.11%20|3.12%20|%203.13-informational?logo=python&logoColor=ffdd54
 [ruff-badge]: https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json
 [ruff]: https://docs.astral.sh/ruff
 [tests-badge]: https://famura.github.io/binned-cdf/latest/exported/tests/badge.svg
