@@ -102,20 +102,3 @@ jobs:
 
             - name: Publish to PyPI
               uses: pypa/gh-action-pypi-publish@release/v1
-
-    update_release_draft:
-        name: Update Release Notes
-        needs: publish-pypi
-        runs-on: ubuntu-latest
-        container: ubuntu:latest
-        timeout-minutes: 10
-        permissions:
-            contents: write
-            pull-requests: read
-        steps:
-            - name: Set GHE_HOST
-              run: echo "GHE_HOST=${GITHUB_SERVER_URL##https:\/\/}" >> ${GITHUB_ENV}
-
-            - uses: release-drafter/release-drafter@v6
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
