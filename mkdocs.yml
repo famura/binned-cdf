@@ -3,7 +3,7 @@ edit_uri: "edit/main/docs"
 repo_name: "binned-cdf"
 repo_url: "https://github.com/famura/binned-cdf"
 site_author: "Fabio Muratore"
-site_description: "Implementations of the CRPS using PyTorch"
+site_description: "A PyTorch-based distribution parametrized by the logits of CDF bins"
 site_dir: .site
 site_name: "binned-cdf"
 site_url: "https://famura.github.io/binned-cdf"
