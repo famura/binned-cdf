@@ -10,6 +10,9 @@
 - name: "area: repo"
   color: "#4dff4d"
   description: "Tooling or the repository"
+- name: "area: source"
+  color: "#a64dff"
+  description: "Core source code"
 
 - name: "priority: critical"
   color: "#ff4d4d"
