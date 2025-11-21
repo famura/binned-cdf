@@ -1,4 +1,5 @@
 import math
+from typing import Literal
 
 import torch
 from torch.distributions import Distribution, constraints
@@ -24,6 +25,7 @@ class BinnedLogitCDF(Distribution):
         bound_low: float = -1e3,
         bound_up: float = 1e3,
         log_spacing: bool = False,
+        bin_normalization_method: Literal["sigmoid", "softmax"] = "sigmoid",
         validate_args: bool | None = None,
     ) -> None:
         """Initializer.
@@ -33,11 +35,14 @@ class BinnedLogitCDF(Distribution):
             bound_low: Lower bound of the distribution support, needs to be finite.
             bound_up: Upper bound of the distribution support, needs to be finite.
             log_spacing: Whether logarithmic (base = 2) spacing for the bins or linear spacing should be used.
+            bin_normalization_method: How to normalize bin probabilities. Either "sigmoid" or "softmax". With "sigmoid",
+                each bin is independently activated, while with "softmax", the bins activations influence each other.
             validate_args: Whether to validate arguments. Carried over to keep the interface with the base class.
         """
         self.logits = logits
         self.bound_low = bound_low
         self.bound_up = bound_up
+        self.bin_normalization_method = bin_normalization_method
         self.log_spacing = log_spacing
 
         # Create bin structure (same for all batch dimensions).
@@ -143,8 +148,12 @@ class BinnedLogitCDF(Distribution):
     @property
     def bin_probs(self) -> torch.Tensor:
         """Get normalized probabilities for each bin, of shape (*batch_shape, num_bins)."""
-        raw_probs = torch.sigmoid(self.logits)  # shape: (*batch_shape, num_bins)
-        return raw_probs / raw_probs.sum(dim=-1, keepdim=True)
+        if self.bin_normalization_method == "sigmoid":
+            raw_probs = torch.sigmoid(self.logits)  # shape: (*batch_shape, num_bins)
+            bin_probs = raw_probs / raw_probs.sum(dim=-1, keepdim=True)
+        else:
+            bin_probs = torch.softmax(self.logits, dim=-1)  # shape: (*batch_shape, num_bins)
+        return bin_probs
 
     @property
     def mean(self) -> torch.Tensor:
