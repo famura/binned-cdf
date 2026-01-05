@@ -223,35 +223,34 @@ class BinnedLogitCDF(Distribution):
 
         value = value.to(dtype=self.logits.dtype, device=self.logits.device)
 
-        # Determine number of sample dimensions (dimensions before batch_shape).
+        # Use binary search to find which bin each value belongs to. The torch.searchsorted function returns the
+        # index where value would be inserted to maintain sorted order.
+        # Since bins are defined as [edge[i], edge[i+1]), we subtract 1 to get the bin index.
+        bin_indices = torch.searchsorted(self.bin_edges, value) - 1  # shape: (*sample_shape, *batch_shape)
+
+        # Clamp to valid range [0, num_bins - 1] to handle edge cases:
+        # - values below bound_low would give bin_idx = -1
+        # - values at bound_up would give bin_idx = num_bins
+        bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
+
+        # Gather the bin widths and probabilities for the selected bins.
+
+        # For bin_widths of shape (num_bins,) we can index directly.
+        bin_widths_selected = self.bin_widths[bin_indices]  # shape: (*sample_shape, *batch_shape)
+
+        # For bin_probs of shape (*batch_shape, num_bins) we need to use gather along the last dimension.
+        bin_indices_for_gather = bin_indices.unsqueeze(-1)  # shape: (*sample_shape, *batch_shape, 1)
+
+        # Expand bin_probs to match sample dimensions.
         num_sample_dims = len(value.shape) - len(self.batch_shape)
+        probs_expanded = self.bin_probs.view((1,) * num_sample_dims + self.bin_probs.shape)
 
-        # Prepend singleton dimensions for sample_shape to bin_edges, bin_widths, and probs.
-        # For all of them, the resulting shape will be: (*sample_shape, *batch_shape, num_bins)
-        bin_edges_left = self.bin_edges[..., :-1]  # shape: (*batch_shape, num_bins)
-        bin_edges_right = self.bin_edges[..., 1:]  # shape: (*batch_shape, num_bins)
-        bin_edges_left = bin_edges_left.view((1,) * num_sample_dims + bin_edges_left.shape)
-        bin_edges_right = bin_edges_right.view((1,) * num_sample_dims + bin_edges_right.shape)
-        bin_widths = self.bin_widths.view((1,) * num_sample_dims + self.bin_widths.shape)
-        probs = self.bin_probs.view((1,) * num_sample_dims + self.bin_probs.shape)
+        # Gather and squeeze the extra dimension.
+        probs_selected = torch.gather(probs_expanded, -1, bin_indices_for_gather)
+        probs_selected = probs_selected.squeeze(-1)
 
-        # Add bin dimension to value for broadcasting.
-        value_expanded = value.unsqueeze(-1)  # shape: (*sample_shape, *batch_shape, 1)
-
-        # Check which bin each value falls into. Result shape: (*sample_shape, *batch_shape, num_bins).
-        in_bin = ((value_expanded >= bin_edges_left) & (value_expanded < bin_edges_right)).to(self.logits.dtype)
-
-        # Handle right edge case (include bound_up in last bin).
-        at_right_edge = torch.isclose(
-            value_expanded, torch.tensor(self.bound_up, dtype=self.logits.dtype, device=self.logits.device)
-        )
-        in_bin[..., -1] = torch.max(in_bin[..., -1], at_right_edge[..., -1])
-
-        # PDF = (probability mass / bin width) for the containing bin.
-        pdf_per_bin = probs / bin_widths  # shape: (*sample_shape, *batch_shape, num_bins)
-
-        # Sum over bins is the same as selecting the bin, as there is only one bin active per value.
-        return torch.sum(in_bin * pdf_per_bin, dim=-1)
+        # Compute PDF = probability mass / bin width.
+        return probs_selected / bin_widths_selected
 
     def cdf(self, value: torch.Tensor) -> torch.Tensor:
         """Compute cumulative distribution function at given values.
