@@ -273,25 +273,34 @@ class BinnedLogitCDF(Distribution):
 
         value = value.to(dtype=self.logits.dtype, device=self.logits.device)
 
-        # Determine number of sample dimensions (dimensions before batch_shape).
-        num_sample_dims = len(value.shape) - len(self.batch_shape)
+        # Explicitly broadcast value to batch_shape if needed (e.g., scalar inputs with batched distributions).
+        if len(self.batch_shape) > 0 and value.ndim < len(self.batch_shape):
+            value = value.expand(self.batch_shape)
 
-        # Prepend singleton dimensions for sample_shape to bin_centers.
-        # bin_centers: (*batch_shape, num_bins) -> (*sample_shape, *batch_shape, num_bins)
-        bin_centers_expanded = self.bin_centers.view((1,) * num_sample_dims + self.bin_centers.shape)
+        # Use binary search to find how many bin centers are <= value.
+        # torch.searchsorted with right=True gives us the number of elements <= value.
+        num_bins_active = torch.searchsorted(self.bin_centers, value, right=True)
 
-        # Prepend singleton dimensions for sample_shape to probs.
-        # probs: (*batch_shape, num_bins) -> (*sample_shape, *batch_shape, num_bins)
-        probs_expanded = self.bin_probs.view((1,) * num_sample_dims + self.bin_probs.shape)
+        # Clamp to valid range [0, num_bins].
+        num_bins_active = torch.clamp(num_bins_active, 0, self.num_bins)  # shape: (*sample_shape, *batch_shape)
 
-        # Add the bin dimension to the input which is used for comparing with the bin centers.
-        value_expanded = value.unsqueeze(-1)  # shape: (*sample_shape, *batch_shape, 1)
+        # Compute cumulative sum of bin probabilities.
+        # Prepend 0 for the case where no bins are active.
+        num_sample_dims = len(num_bins_active.shape) - len(self.batch_shape)
+        cumsum_probs = torch.cumsum(self.bin_probs, dim=-1)  # shape: (*batch_shape, num_bins)
+        cumsum_probs = torch.cat(
+            [torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device), cumsum_probs],
+            dim=-1,
+        )  # shape: (*batch_shape, num_bins + 1)
 
-        # Mask for bins with centers <= value.
-        mask = bin_centers_expanded <= value_expanded  # shape: (*sample_shape, *batch_shape, num_bins)
+        # Expand cumsum_probs to match sample dimensions and gather.
+        cumsum_probs_for_gather = cumsum_probs.view((1,) * num_sample_dims + cumsum_probs.shape)
+        cumsum_probs_for_gather = cumsum_probs_for_gather.expand(*num_bins_active.shape, -1)
+        num_bins_active_for_gather = num_bins_active.unsqueeze(-1)  # shape: (*sample_shape, *batch_shape, 1)
+        cdf_values = torch.gather(cumsum_probs_for_gather, dim=-1, index=num_bins_active_for_gather)
+        cdf_values = cdf_values.squeeze(-1)
 
-        # Sum the bins for this value by their weighted "activation"=probability.
-        return torch.sum(mask * probs_expanded, dim=-1)
+        return cdf_values
 
     def icdf(self, value: torch.Tensor) -> torch.Tensor:
         """Compute the inverse CDF, i.e., the quantile function, at the given values.
