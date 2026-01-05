@@ -223,10 +223,8 @@ class BinnedLogitCDF(Distribution):
 
         value = value.to(dtype=self.logits.dtype, device=self.logits.device)
 
-        # Broadcast value to batch_shape if needed (e.g., scalar inputs with batched distributions).
+        # Explicitly broadcast value to batch_shape if needed (e.g., scalar inputs with batched distributions).
         if len(self.batch_shape) > 0 and value.ndim < len(self.batch_shape):
-            # Expand value to have the correct batch dimensions.
-            # For example: scalar value with batch_shape=(8,) → value.shape=(8,)
             value = value.expand(self.batch_shape)
 
         # Use binary search to find which bin each value belongs to. The torch.searchsorted function returns the
@@ -240,39 +238,24 @@ class BinnedLogitCDF(Distribution):
         bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
 
         # Gather the bin widths and probabilities for the selected bins.
-
         # For bin_widths of shape (num_bins,) we can index directly.
         bin_widths_selected = self.bin_widths[bin_indices]  # shape: (*sample_shape, *batch_shape)
 
-        # For bin_probs of shape (*batch_shape, num_bins), we need to handle batch indexing.
-        # We'll use advanced indexing to select the appropriate bins.
-        # First, we need to create batch indices that match the shape of bin_indices.
+        # For bin_probs of shape (*batch_shape, num_bins) we need to use gather along the last dimension.
+        # Add sample dimensions to bin_probs and expand to match bin_indices shape.
+        num_sample_dims = len(bin_indices.shape) - len(self.batch_shape)
+        bin_probs_for_gather = self.bin_probs.view((1,) * num_sample_dims + self.bin_probs.shape)
+        bin_probs_for_gather = bin_probs_for_gather.expand(
+            *bin_indices.shape, -1
+        )  # shape: (*sample_shape, *batch_shape, num_bins)
 
-        if len(self.batch_shape) == 0:
-            # No batch dimensions - simple case.
-            probs_selected = self.bin_probs[bin_indices]
-        else:
-            # With batch dimensions, we need to construct proper indices.
-            # bin_probs has shape (*batch_shape, num_bins)
-            # bin_indices has shape (*sample_shape, *batch_shape)
-            # We need to index into the last dimension of bin_probs using bin_indices,
-            # while preserving the batch structure.
-
-            # Create batch indices: for each batch dimension, we need indices [0, 1, 2, ...]
-            # that broadcast correctly with the sample shape.
-            batch_indices = []
-            for i, batch_dim in enumerate(self.batch_shape):
-                # Create a shape that's 1 everywhere except at this batch dimension
-                shape = [1] * len(bin_indices.shape)
-                shape[len(bin_indices.shape) - len(self.batch_shape) + i] = batch_dim
-                batch_idx = torch.arange(batch_dim, device=bin_indices.device).view(shape)
-                batch_indices.append(batch_idx)
-
-            # Use advanced indexing: bin_probs[batch_idx_0, batch_idx_1, ..., bin_indices]
-            probs_selected = self.bin_probs[*batch_indices, bin_indices]
+        # Gather the selected bin probabilities.
+        bin_indices_for_gather = bin_indices.unsqueeze(-1)  # shape: (*sample_shape, *batch_shape, 1)
+        bin_probs_selected = torch.gather(bin_probs_for_gather, dim=-1, index=bin_indices_for_gather)
+        bin_probs_selected = bin_probs_selected.squeeze(-1)
 
         # Compute PDF = probability mass / bin width.
-        return probs_selected / bin_widths_selected
+        return bin_probs_selected / bin_widths_selected
 
     def cdf(self, value: torch.Tensor) -> torch.Tensor:
         """Compute cumulative distribution function at given values.
