@@ -141,6 +141,7 @@ extend-select = [
   "W", # pycodestyle (warning)
 ]
 ignore = [
+  "ANN401", # annotate variable with type "Any"
   "CPY001", # missing copyright notice at the top of the file
   "D100", # missing docstring in public module
   "D104", # missing docstring in public package

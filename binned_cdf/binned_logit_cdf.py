@@ -230,6 +230,7 @@ class BinnedLogitCDF(Distribution):
         # Use binary search to find which bin each value belongs to. The torch.searchsorted function returns the
         # index where value would be inserted to maintain sorted order.
         # Since bins are defined as [edge[i], edge[i+1]), we subtract 1 to get the bin index.
+        value = value.contiguous()
         bin_indices = torch.searchsorted(self.bin_edges, value) - 1  # shape: (*sample_shape, *batch_shape)
 
         # Clamp to valid range [0, num_bins - 1] to handle edge cases:
@@ -279,6 +280,7 @@ class BinnedLogitCDF(Distribution):
 
         # Use binary search to find how many bin centers are <= value.
         # torch.searchsorted with right=True gives us the number of elements <= value.
+        value = value.contiguous()
         num_bins_active = torch.searchsorted(self.bin_centers, value, right=True)
 
         # Clamp to valid range [0, num_bins].
