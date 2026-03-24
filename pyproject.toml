@@ -47,7 +47,7 @@ dependencies = [
 ]
 description = "A PyTorch-based distribution parametrized by the logits of CDF bins"
 dynamic = ["version"]
-license = "CC-BY-4.0"
+license = "BSD-3-Clause"
 maintainers = [{name = "Fabio Muratore", email = "accounts@famura.net"}]
 name = "binned-cdf"
 readme = "readme.md"
