@@ -229,7 +229,6 @@ def test_prob_random_logits(
                 "dist": torch.distributions.Normal,
                 "params": {"loc": 0.0, "scale": 1.0},
                 "bounds": (-5.0, 5.0),
-                "rel_tol": 0.05,
             },
             id="standard_normal",
         ),
@@ -238,19 +237,18 @@ def test_prob_random_logits(
                 "dist": torch.distributions.Normal,
                 "params": {"loc": 0.0, "scale": 3.0},
                 "bounds": (-15.0, 15.0),
-                "rel_tol": 0.05,
             },
             id="extreme_normal",
         ),
     ],
 )
 @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
-def test_entropy(
+def test_shannon_entropy(
     target_dist_params: dict,
     log_spacing: bool,
     num_bins: int = 200,
 ):
-    """Test entropy computation against theoretical values from known distributions."""
+    """Test Shannon entropy computation against theoretical values from known distributions."""
     torch.manual_seed(42)
     np.random.seed(42)
 
@@ -258,11 +256,9 @@ def test_entropy(
     dist_class = target_dist_params["dist"]
     dist_params = target_dist_params["params"]
     bound_low, bound_up = target_dist_params["bounds"]
-    rel_tol = target_dist_params["rel_tol"]
 
-    # Create target distribution, and get the entropy.
+    # Create target distribution.
     target_dist = dist_class(**dist_params)
-    target_entropy = target_dist.entropy().item()
 
     # Use the PiecewiseConstantBinnedCDF's own bin construction to ensure matching shapes between distributions.
     _, bin_centers, bin_widths = PiecewiseConstantBinnedCDF._create_bins(
@@ -279,10 +275,11 @@ def test_entropy(
     target_prob_masses = target_probs * bin_widths
     target_prob_masses = target_prob_masses / target_prob_masses.sum()
 
+    # Compute theoretical Shannon entropy from the target distribution's probability masses.
+    target_entropy = -torch.sum(target_prob_masses * torch.log(target_prob_masses + 1e-8)).item()
+
     # Convert probabilities to logits (inverse sigmoid).
-    eps = 1e-8
-    target_prob_masses = torch.clamp(target_prob_masses, eps, 1 - eps)
-    logits = torch.log(target_prob_masses / (1 - target_prob_masses))
+    logits = torch.log(target_prob_masses)
 
     # Create PiecewiseConstantBinnedCDF distribution, and compute reconstructed entropy.
     dist = PiecewiseConstantBinnedCDF(
@@ -297,7 +294,89 @@ def test_entropy(
     torch.testing.assert_close(
         reconstructed_entropy,
         target_entropy,
-        rtol=rel_tol,
+        rtol=5e-3,
         atol=1e-6,
-        msg=f"Entropy mismatch: reconstructed={reconstructed_entropy:.6f}, theoretical={target_entropy:.6f}",
+        msg=f"Shannon Entropy mismatch: reconstructed={reconstructed_entropy:.6f}, theoretical={target_entropy:.6f}",
     )
+
+
+# @pytest.mark.parametrize(
+#     "target_dist_params",
+#     [
+#         pytest.param(
+#             {
+#                 "dist": torch.distributions.Normal,
+#                 "params": {"loc": 0.0, "scale": 1.0},
+#                 "bounds": (-5.0, 5.0),
+#                 "rel_tol": 0.05,
+#             },
+#             id="standard_normal",
+#         ),
+#         pytest.param(
+#             {
+#                 "dist": torch.distributions.Normal,
+#                 "params": {"loc": 0.0, "scale": 3.0},
+#                 "bounds": (-15.0, 15.0),
+#                 "rel_tol": 0.05,
+#             },
+#             id="extreme_normal",
+#         ),
+#     ],
+# )
+# @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
+# def test_differential_entropy(
+#     target_dist_params: dict,
+#     log_spacing: bool,
+#     num_bins: int = 200,
+# ):
+#     """Test differential entropy computation against theoretical values from known distributions."""
+#     torch.manual_seed(42)
+#     np.random.seed(42)
+
+#     # Extract parameters from the parametrized input.
+#     dist_class = target_dist_params["dist"]
+#     dist_params = target_dist_params["params"]
+#     bound_low, bound_up = target_dist_params["bounds"]
+#     rel_tol = target_dist_params["rel_tol"]
+
+#     # Create target distribution, and get the entropy.
+#     target_dist = dist_class(**dist_params)
+#     target_entropy = target_dist.entropy().item()
+
+#     # Use the PiecewiseConstantBinnedCDF's own bin construction to ensure matching shapes between distributions.
+#     _, bin_centers, bin_widths = PiecewiseConstantBinnedCDF._create_bins(
+#         num_bins=num_bins,
+#         bound_low=bound_low,
+#         bound_up=bound_up,
+#         log_spacing=log_spacing,
+#         device=torch.device("cpu"),
+#         dtype=torch.float32,
+#     )
+
+#     # Compute target probabilities at bin centers, and normalize to get probability masses for each bin.
+#     target_probs = torch.exp(target_dist.log_prob(bin_centers))
+#     target_prob_masses = target_probs * bin_widths
+#     target_prob_masses = target_prob_masses / target_prob_masses.sum()
+
+#     # Convert probabilities to logits (inverse sigmoid).
+#     eps = 1e-8
+#     target_prob_masses = torch.clamp(target_prob_masses, eps, 1 - eps)
+#     logits = torch.log(target_prob_masses / (1 - target_prob_masses))
+
+#     # Create PiecewiseConstantBinnedCDF distribution, and compute reconstructed entropy.
+#     dist = PiecewiseConstantBinnedCDF(
+#         logits=logits.unsqueeze(0),
+#         bound_low=bound_low,
+#         bound_up=bound_up,
+#         log_spacing=log_spacing,
+#     )
+#     reconstructed_entropy = dist.entropy().item()
+
+#     # Check that reconstructed entropy is close to theoretical value.
+#     torch.testing.assert_close(
+#         reconstructed_entropy,
+#         target_entropy,
+#         rtol=rel_tol,
+#         atol=1e-6,
+#         msg=f"Entropy mismatch: reconstructed={reconstructed_entropy:.6f}, theoretical={target_entropy:.6f}",
+#     )

@@ -3,6 +3,7 @@ from typing import Literal
 
 import torch
 from torch.distributions import Distribution, constraints
+from torch.nn.functional import log_softmax, logsigmoid
 
 _size = torch.Size()
 
@@ -210,6 +211,13 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         value = value.to(dtype=self.logits.dtype, device=self.logits.device)
 
+        # This ensures the batch dimension is the last dimension.
+        if len(self.batch_shape) > 0:  # noqa: SIM102
+            # Check if the rightmost dimensions of value match batch_shape.
+            # If they don't, we assume value is missing the batch dimensions.
+            if value.shape[-len(self.batch_shape) :] != self.batch_shape:
+                value = value.unsqueeze(-1)
+
         # Explicitly broadcast value to batch_shape if needed (e.g., scalar inputs with batched distributions).
         num_sample_dims = max(0, value.ndim - len(self.batch_shape))
         target_shape = torch.Size(value.shape[:num_sample_dims]) + self.batch_shape
@@ -228,15 +236,16 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         # Calculate log_probs directly for stability
         if self.bin_normalization_method == "sigmoid":
-            # Normalized log_sigmoid: log(sigmoid(x) / sum(sigmoid(x)))
-            log_raw = torch.log_sigmoid(self.logits)
+            # Normalized logsigmoid: log(sigmoid(x) / sum(sigmoid(x)))
+            log_raw = logsigmoid(self.logits)
             log_normalization = torch.logsumexp(log_raw, dim=-1, keepdim=True)
             log_bin_probs = log_raw - log_normalization
         else:
-            log_bin_probs = torch.log_softmax(self.logits, dim=-1)
+            log_bin_probs = log_softmax(self.logits, dim=-1)
 
         # Gather efficiently. Reshape to add leading singleton dimensions for sample_shape.
         log_bin_probs_expanded = log_bin_probs.view((1,) * num_sample_dims + log_bin_probs.shape)
+        log_bin_probs_expanded = log_bin_probs_expanded.expand(*value.shape, -1)
         # Use gather with automatic broadcasting. unsqueeze(-1) provides the index dimension,
         # and squeeze(-1) removes it from the result.
         log_prob = torch.gather(log_bin_probs_expanded, dim=-1, index=bin_indices.unsqueeze(-1)).squeeze(-1)
@@ -259,6 +268,13 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         value = value.to(dtype=self.logits.dtype, device=self.logits.device)
 
+        # This ensures the batch dimension is the last dimension.
+        if len(self.batch_shape) > 0:  # noqa: SIM102
+            # Check if the rightmost dimensions of value match batch_shape.
+            # If they don't, we assume value is missing the batch dimensions.
+            if value.shape[-len(self.batch_shape) :] != self.batch_shape:
+                value = value.unsqueeze(-1)
+
         # Explicitly broadcast value to batch_shape if needed (e.g., scalar inputs with batched distributions).
         num_sample_dims = max(0, value.ndim - len(self.batch_shape))
         target_shape = torch.Size(value.shape[:num_sample_dims]) + self.batch_shape
@@ -276,9 +292,9 @@ class PiecewiseConstantBinnedCDF(Distribution):
         bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
 
         # Gather efficiently. Reshape to add leading singleton dimensions for sample_shape.
-        bin_probs_expanded = self.bin_probs.view(
-            (1,) * num_sample_dims + self.bin_probs.shape
-        )  # Use gather with automatic broadcasting. unsqueeze(-1) provides the index dimension,
+        bin_probs_expanded = self.bin_probs.view((1,) * num_sample_dims + self.bin_probs.shape)
+        bin_probs_expanded = bin_probs_expanded.expand(*value.shape, -1)
+        # Use gather with automatic broadcasting. unsqueeze(-1) provides the index dimension,
         # and squeeze(-1) removes it from the result.
         bin_probs_selected = torch.gather(bin_probs_expanded, dim=-1, index=bin_indices.unsqueeze(-1)).squeeze(-1)
 
@@ -300,6 +316,13 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         value = value.to(dtype=self.logits.dtype, device=self.logits.device)
 
+        # This ensures the batch dimension is the last dimension.
+        if len(self.batch_shape) > 0:  # noqa: SIM102
+            # Check if the rightmost dimensions of value match batch_shape.
+            # If they don't, we assume value is missing the batch dimensions.
+            if value.shape[-len(self.batch_shape) :] != self.batch_shape:
+                value = value.unsqueeze(-1)
+
         # Explicitly broadcast value to batch_shape if needed (e.g., scalar inputs with batched distributions).
         num_sample_dims = max(0, value.ndim - len(self.batch_shape))
         target_shape = torch.Size(value.shape[:num_sample_dims]) + self.batch_shape
@@ -315,17 +338,15 @@ class PiecewiseConstantBinnedCDF(Distribution):
         # Clamp to valid range [0, num_bins].
         bin_indices = torch.clamp(bin_indices, 0, self.num_bins)  # shape: (*sample_shape, *batch_shape)
 
-        # Compute cumulative sum of bin probabilities.
+        # Compute the cumulative sum of bin probabilities.
         # Prepend 0 for the case where no bins are active.
-        num_sample_dims = len(bin_indices.shape) - len(self.batch_shape)
         cumsum_probs = torch.cumsum(self.bin_probs, dim=-1)  # shape: (*batch_shape, num_bins)
-        cumsum_probs = torch.cat(
-            [torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device), cumsum_probs],
-            dim=-1,
-        )  # shape: (*batch_shape, num_bins + 1)
+        zero_prefix = torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device)
+        cumsum_probs = torch.cat([zero_prefix, cumsum_probs], dim=-1)  # shape: (*batch_shape, num_bins + 1)
 
         # Gather efficiently. Reshape to add leading singleton dimensions for sample_shape.
         cumsum_probs_expanded = cumsum_probs.view((1,) * num_sample_dims + cumsum_probs.shape)
+        cumsum_probs_expanded = cumsum_probs_expanded.expand(*value.shape, -1)
         # Use gather with automatic broadcasting. unsqueeze(-1) provides the index dimension,
         # and squeeze(-1) removes it from the result.
         cdf_values = torch.gather(cumsum_probs_expanded, dim=-1, index=bin_indices.unsqueeze(-1)).squeeze(-1)
@@ -348,6 +369,13 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         value = value.to(dtype=self.logits.dtype, device=self.logits.device)
 
+        # This ensures the batch dimension is the last dimension.
+        if len(self.batch_shape) > 0:  # noqa: SIM102
+            # Check if the rightmost dimensions of value match batch_shape.
+            # If they don't, we assume value is missing the batch dimensions.
+            if value.shape[-len(self.batch_shape) :] != self.batch_shape:
+                value = value.unsqueeze(-1)
+
         # Explicitly broadcast value to batch_shape if needed (e.g., scalar inputs with batched distributions).
         num_sample_dims = max(0, value.ndim - len(self.batch_shape))
         target_shape = torch.Size(value.shape[:num_sample_dims]) + self.batch_shape
@@ -364,7 +392,9 @@ class PiecewiseConstantBinnedCDF(Distribution):
         )  # [0, p1, p1+p2, ..., 1.0], shape: (*batch_shape, num_bins + 1)
 
         # Prepend singleton dimensions for sample_shape to cdf_edges and expand to match value.
-        cdf_edges_expanded = cdf_edges.view((1,) * num_sample_dims + cdf_edges.shape).expand(*value.shape, -1)
+        cdf_edges_expanded = cdf_edges.view((1,) * num_sample_dims + cdf_edges.shape)
+        cdf_edges_expanded = cdf_edges_expanded.expand(*value.shape, -1)
+        cdf_edges_expanded = cdf_edges_expanded.contiguous()
 
         # Find bins containing the value using binary search instead of a mask.
         # right=True ensures that value=1.0 is handled correctly by selecting the last bin.
@@ -375,13 +405,15 @@ class PiecewiseConstantBinnedCDF(Distribution):
         # - values at bound_up would give bin_idx = num_bins
         bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
 
-        # Gather efficiently. We don't expand bin_centers to the full batch/sample shape. Instead, we just index into
-        # the 1D tensor using the flattened indices, then reshape back. This is faster and more memory-efficient
-        # than a huge expanded gather.
-        flat_quantiles = self.bin_centers[bin_indices.reshape(-1)]  # shape: (num_total_samples,)
+        # Gather efficiently. We only add singleton dimensions for the sample dimensions, as self.bin_centers
+        # already contains the batch dimensions..
+        bin_centers_expanded = self.bin_centers.view((1,) * num_sample_dims + self.bin_centers.shape)
+        bin_centers_expanded = bin_centers_expanded.expand(*value.shape, -1)
+        # Use gather with automatic broadcasting.
+        quantiles = torch.gather(bin_centers_expanded, dim=-1, index=bin_indices).squeeze(-1)
 
         # Return the discrete quantiles.
-        return flat_quantiles.reshape(value.shape)  # shape: (*sample_shape, *batch_shape)
+        return quantiles  # shape: (*sample_shape, *batch_shape)
 
     @torch.no_grad()
     def sample(self, sample_shape: torch.Size | list[int] | tuple[int, ...] = _size) -> torch.Tensor:

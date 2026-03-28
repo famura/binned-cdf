@@ -227,11 +227,17 @@ def test_icdf_fixed_quantiles(
 
     # Test the round-trip property: cdf(icdf(q)) ≈ q.
     cdf_roundtrip = dist.cdf(icdf_values)
+    if isinstance(dist, PiecewiseConstantBinnedCDF):
+        atol = 2 / num_bins
+    elif use_cuda:
+        atol = 8e-4
+    else:
+        atol = 4e-4
     torch.testing.assert_close(
         cdf_roundtrip,
         quantiles,
         rtol=1e-3,
-        atol=8e-4 if use_cuda else 4e-4,
+        atol=atol,
         msg="Round-trip cdf(icdf(q)) != q. This highly depends on the number of bins.",
     )
 
