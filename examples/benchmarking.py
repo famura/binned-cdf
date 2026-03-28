@@ -4,8 +4,7 @@ from typing import Any
 
 import torch
 import torch.utils.benchmark as benchmark
-
-from binned_cdf.binned_logit_cdf import BinnedLogitCDF
+from binned_cdf.binned_logit_cdf import PiecewiseConstantBinnedCDF
 
 
 def measure_performance(
@@ -72,7 +71,7 @@ def report_results(results: dict[str, tuple[float, int]]) -> None:
 
 
 def benchmark_shape(shape: tuple[int, ...], num_bins: int = 32, num_iter: int = 100) -> None:
-    """Benchmarks several function of the BinnedLogitCDF class for a specific logit shape.
+    """Benchmarks several function of the PiecewiseConstantBinnedCDF class for a specific logit shape.
 
     This function measures the average time and memory usage.
 
@@ -87,11 +86,11 @@ def benchmark_shape(shape: tuple[int, ...], num_bins: int = 32, num_iter: int = 
     logits = torch.randn(*shape)
     y = torch.randn(shape[:-1])
     quantiles = torch.rand_like(y)
-    dist = BinnedLogitCDF(logits)  # instantiate once for forward testing
+    dist = PiecewiseConstantBinnedCDF(logits)  # instantiate once for forward testing
 
     # Run benchmarks.
     results = {}
-    results["__init__"] = measure_performance(BinnedLogitCDF, logits, num_iter_measure=num_iter)
+    results["__init__"] = measure_performance(PiecewiseConstantBinnedCDF, logits, num_iter_measure=num_iter)
     results["prob"] = measure_performance(dist.prob, y, num_iter_measure=num_iter)
     results["cdf"] = measure_performance(dist.cdf, y, num_iter_measure=num_iter)
     results["icdf"] = measure_performance(dist.icdf, quantiles, num_iter_measure=num_iter)

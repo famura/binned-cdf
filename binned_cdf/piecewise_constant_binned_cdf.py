@@ -7,8 +7,8 @@ from torch.distributions import Distribution, constraints
 _size = torch.Size()
 
 
-class BinnedLogitCDF(Distribution):
-    """A histogram-based probability distribution parameterized by a bins for the CDF.
+class PiecewiseConstantBinnedCDF(Distribution):
+    """A discrete probability distribution parameterized by binned logits for the CDF.
 
     Each bin contributes a step function to the CDF when active.
     The activation of each bin is determined by applying a sigmoid to the corresponding logit.
@@ -137,12 +137,12 @@ class BinnedLogitCDF(Distribution):
 
     @property
     def num_bins(self) -> int:
-        """Number of bins making up the BinnedLogitCDF."""
+        """Number of bins making up the PiecewiseConstantBinnedCDF."""
         return self.logits.shape[-1]
 
     @property
     def num_edges(self) -> int:
-        """Number of bins edges of the BinnedLogitCDF."""
+        """Number of bins edges of the PiecewiseConstantBinnedCDF."""
         return self.bin_edges.shape[0]
 
     @property
@@ -183,10 +183,10 @@ class BinnedLogitCDF(Distribution):
 
     def expand(
         self, batch_shape: torch.Size | list[int] | tuple[int, ...], _instance: Distribution | None = None
-    ) -> "BinnedLogitCDF":
+    ) -> "PiecewiseConstantBinnedCDF":
         """Expand distribution to new batch shape. This creates a new instance."""
         expanded_logits = self.logits.expand((*torch.Size(batch_shape), self.num_bins))
-        return BinnedLogitCDF(
+        return self.__class__(
             logits=expanded_logits,
             bound_low=self.bound_low,
             bound_up=self.bound_up,
@@ -281,14 +281,14 @@ class BinnedLogitCDF(Distribution):
         # Use binary search to find how many bin centers are <= value.
         # torch.searchsorted with right=True gives us the number of elements <= value.
         value = value.contiguous()
-        num_bins_active = torch.searchsorted(self.bin_centers, value, right=True)
+        bin_indices_active = torch.searchsorted(self.bin_centers, value, right=True)
 
         # Clamp to valid range [0, num_bins].
-        num_bins_active = torch.clamp(num_bins_active, 0, self.num_bins)  # shape: (*sample_shape, *batch_shape)
+        bin_indices_active = torch.clamp(bin_indices_active, 0, self.num_bins)  # shape: (*sample_shape, *batch_shape)
 
         # Compute cumulative sum of bin probabilities.
         # Prepend 0 for the case where no bins are active.
-        num_sample_dims = len(num_bins_active.shape) - len(self.batch_shape)
+        num_sample_dims = len(bin_indices_active.shape) - len(self.batch_shape)
         cumsum_probs = torch.cumsum(self.bin_probs, dim=-1)  # shape: (*batch_shape, num_bins)
         cumsum_probs = torch.cat(
             [torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device), cumsum_probs],
@@ -297,9 +297,9 @@ class BinnedLogitCDF(Distribution):
 
         # Expand cumsum_probs to match sample dimensions and gather.
         cumsum_probs_for_gather = cumsum_probs.view((1,) * num_sample_dims + cumsum_probs.shape)
-        cumsum_probs_for_gather = cumsum_probs_for_gather.expand(*num_bins_active.shape, -1)
-        num_bins_active_for_gather = num_bins_active.unsqueeze(-1)  # shape: (*sample_shape, *batch_shape, 1)
-        cdf_values = torch.gather(cumsum_probs_for_gather, dim=-1, index=num_bins_active_for_gather)
+        cumsum_probs_for_gather = cumsum_probs_for_gather.expand(*bin_indices_active.shape, -1)
+        bin_indices_active_for_gather = bin_indices_active.unsqueeze(-1)  # shape: (*sample_shape, *batch_shape, 1)
+        cdf_values = torch.gather(cumsum_probs_for_gather, dim=-1, index=bin_indices_active_for_gather)
         cdf_values = cdf_values.squeeze(-1)
 
         return cdf_values

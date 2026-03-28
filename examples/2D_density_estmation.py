@@ -2,15 +2,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
+from binned_cdf.binned_logit_cdf import PiecewiseConstantBinnedCDF
 from sklearn.datasets import make_moons
-
-from binned_cdf.binned_logit_cdf import BinnedLogitCDF
 
 sns.set_theme()
 
 
 class DensityNet(torch.nn.Module):
-    """Neural network for 2D density estimation using BinnedLogitCDF."""
+    """Neural network for 2D density estimation using PiecewiseConstantBinnedCDF."""
 
     def __init__(self, num_bins: int) -> None:
         """Initialize the network.
@@ -28,19 +27,19 @@ class DensityNet(torch.nn.Module):
         )
         self.head = torch.nn.Linear(64, 2 * num_bins)
 
-    def forward(self, x: torch.Tensor) -> BinnedLogitCDF:
+    def forward(self, x: torch.Tensor) -> PiecewiseConstantBinnedCDF:
         """Forward pass to create distribution.
 
         Args:
             x: Input coordinates of shape (batch_size, 2).
 
         Returns:
-            BinnedLogitCDF distribution with batch_shape (batch_size, 2).
+            PiecewiseConstantBinnedCDF distribution with batch_shape (batch_size, 2).
         """
         features = self.shared(x)
         logits = self.head(features)
         logits = logits.reshape(*logits.shape[:-1], 2, self.num_bins)
-        dist = BinnedLogitCDF(logits, bound_low=-2.0, bound_up=3.0)
+        dist = PiecewiseConstantBinnedCDF(logits, bound_low=-2.0, bound_up=3.0)
         return dist
 
 
@@ -88,7 +87,7 @@ sns.set_theme()
 fig, axes = plt.subplots(1, 2, figsize=(14, 6))
 axes[0].contourf(xx, yy, prob_joint, levels=30, cmap="viridis")
 axes[0].scatter(X[:, 0].cpu(), X[:, 1].cpu(), s=4, color="red", alpha=0.3)
-axes[0].set_title("Estimated Density (BinnedLogitCDF)")
+axes[0].set_title("Estimated Density (PiecewiseConstantBinnedCDF)")
 axes[0].set_xlabel("x")
 axes[0].set_ylabel("y")
 print("Grid plotting finished.")

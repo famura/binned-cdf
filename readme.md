@@ -37,7 +37,7 @@ suitable for uncertainty estimation, probabilistic prediction, and distributiona
 
 ## Implementation
 
-The `BinnedLogitCDF` class inherits directly from `torch.distributions.Distribution`, implementing all necessary
+The `PiecewiseConstantBinnedCDF` class inherits directly from `torch.distributions.Distribution`, implementing all necessary
 methods plus some convenience functions.
 It supports multi-dimensional batch shapes and CUDA devices.
 The bins can be initialized linearly or log-spaced.
