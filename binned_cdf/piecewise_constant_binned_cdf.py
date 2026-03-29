@@ -299,7 +299,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         return gathered
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        """Compute log probability density at given values.
+        """Compute the log-probability density at given values.
 
         Args:
             value: Values at which to compute the log PDF.
@@ -312,9 +312,9 @@ class PiecewiseConstantBinnedCDF(Distribution):
         if self._validate_args:
             self._validate_sample(value)
 
-        value, num_sample_dims = self._prepare_input(value)
+        value_prep, num_sample_dims = self._prepare_input(value)
 
-        bin_indices = self._get_bin_indices(value, bin_edges=self.bin_edges)
+        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
         # Calculate the log-probabilities directly for stability.
         if self.bin_normalization_method == "sigmoid":
@@ -325,7 +325,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         else:
             log_bin_probs = log_softmax(self.logits, dim=-1)
 
-        log_probs = self._gather_from_bins(log_bin_probs, bin_indices, num_sample_dims, value.shape)
+        log_probs = self._gather_from_bins(log_bin_probs, bin_indices, num_sample_dims, value_prep.shape)
 
         return log_probs
 
@@ -343,11 +343,11 @@ class PiecewiseConstantBinnedCDF(Distribution):
         if self._validate_args:
             self._validate_sample(value)
 
-        value, num_sample_dims = self._prepare_input(value)
+        value_prep, num_sample_dims = self._prepare_input(value)
 
-        bin_indices = self._get_bin_indices(value, bin_edges=self.bin_edges)
+        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
-        probs = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, value.shape)
+        probs = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, value_prep.shape)
 
         return probs
 
@@ -365,9 +365,9 @@ class PiecewiseConstantBinnedCDF(Distribution):
         if self._validate_args:
             self._validate_sample(value)
 
-        value, num_sample_dims = self._prepare_input(value)
+        value_prep, num_sample_dims = self._prepare_input(value)
 
-        bin_indices = self._get_bin_indices(value, bin_centers=self.bin_centers)
+        bin_indices = self._get_bin_indices(value_prep, bin_centers=self.bin_centers)
 
         # Compute the cumulative sum of bin probabilities.
         # Prepend 0 for the case where no bins are active.
@@ -375,7 +375,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         zero_prefix = torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device)
         cumsum_probs = torch.cat([zero_prefix, cumsum_probs], dim=-1)  # shape: (*batch_shape, num_bins + 1)
 
-        cdf_values = self._gather_from_bins(cumsum_probs, bin_indices, num_sample_dims, value.shape)
+        cdf_values = self._gather_from_bins(cumsum_probs, bin_indices, num_sample_dims, value_prep.shape)
 
         return cdf_values
 
@@ -393,7 +393,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         if self._validate_args and not (value >= 0).all() and (value <= 1).all():
             raise ValueError("icdf input must be in [0, 1]")
 
-        value, num_sample_dims = self._prepare_input(value)
+        value_prep, num_sample_dims = self._prepare_input(value)
 
         # Compute CDF at bin edges. Prepend zeros to the cumsum of probabilities as this is always the first edge.
         cdf_edges = torch.cat(
@@ -406,12 +406,12 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         # Prepend singleton dimensions for sample_shape to cdf_edges and expand to match value.
         cdf_edges_expanded = cdf_edges.view((1,) * num_sample_dims + cdf_edges.shape)
-        cdf_edges_expanded = cdf_edges_expanded.expand(*value.shape, -1)
+        cdf_edges_expanded = cdf_edges_expanded.expand(*value_prep.shape, -1)
         cdf_edges_expanded = cdf_edges_expanded.contiguous()
 
-        bin_indices = self._get_bin_indices(value.unsqueeze(-1), bin_edges=cdf_edges_expanded)
+        bin_indices = self._get_bin_indices(value_prep.unsqueeze(-1), bin_edges=cdf_edges_expanded)
 
-        quantiles = self._gather_from_bins(self.bin_centers, bin_indices, num_sample_dims, value.shape)
+        quantiles = self._gather_from_bins(self.bin_centers, bin_indices, num_sample_dims, value_prep.shape)
 
         return quantiles  # shape: (*sample_shape, *batch_shape)
 

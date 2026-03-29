@@ -24,6 +24,57 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
         intra_bin_var = torch.sum(self.bin_probs * (self.bin_widths**2) / 12.0, dim=-1)  # Sheppard's correction
         return discrete_var + intra_bin_var
 
+    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+        """Compute the log-probability density at given values.
+
+        Args:
+            value: Values at which to compute the log PDF.
+                Expected shape: (*sample_shape, *batch_shape) or broadcastable to it.
+
+        Returns:
+            Log PDF values corresponding to the input values.
+            Output shape: same as `value` shape after broadcasting, i.e., (*sample_shape, *batch_shape).
+        """
+        # Compute the log of the probability mass for the bin the value falls into.
+        log_mass = super().log_prob(value)
+
+        # We need to gather the width of the bin the value falls into
+        value_prep, num_sample_dims = self._prepare_input(value)
+        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
+        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, value_prep.shape)
+
+        # Log density = log(mass / width) = log_mass - log_width.
+        log_prob = log_mass - torch.log(widths + 2 * widths.dtype.eps)
+
+        return log_prob
+
+    def prob(self, value: torch.Tensor) -> torch.Tensor:
+        """Compute probability density at given values.
+
+        Args:
+            value: Values at which to compute the PDF.
+                Expected shape: (*sample_shape, *batch_shape) or broadcastable to it.
+
+        Returns:
+            PDF values corresponding to the input values.
+            Output shape: same as `value` shape after broadcasting, i.e., (*sample_shape, *batch_shape).
+        """
+        if self._validate_args:
+            self._validate_sample(value)
+
+        value_prep, num_sample_dims = self._prepare_input(value)
+
+        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
+
+        # Gather normalized mass and bin width.
+        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, value_prep.shape)
+        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, value_prep.shape)
+
+        # Density = p(bin_i) / width_i.
+        prob = masses / (widths + 2 * widths.dtype.eps)
+
+        return prob
+
     def cdf(self, value: torch.Tensor) -> torch.Tensor:
         """Compute cumulative distribution function at given values.
 
@@ -38,53 +89,87 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
         if self._validate_args:
             self._validate_sample(value)
 
-        value = value.to(dtype=self.logits.dtype, device=self.logits.device)
+        value_prep, num_sample_dims = self._prepare_input(value)
 
-        # Explicitly broadcast value to batch_shape if needed (e.g., scalar inputs with batched distributions).
-        if len(self.batch_shape) > 0 and value.ndim < len(self.batch_shape):
-            value = value.expand(self.batch_shape)
+        # Find the bin in probability space.
+        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
-        # Use binary search to find how many bin centers are <= value.
-        value = value.contiguous()
+        # Gather the interpolation parameters.
+        left_edges = self._gather_from_bins(self.bin_edges[:-1], bin_indices, num_sample_dims, value_prep.shape)
+        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, value_prep.shape)
+        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, value_prep.shape)
 
-        # Find which bin the value falls into
-        bin_indices_active = torch.searchsorted(self.bin_edges, value) - 1
+        # Get base CDF at the left edge of the bin.
+        cumsum_probs = torch.cumsum(self.bin_probs, dim=-1)
+        zero_prefix = torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device)
+        base_cdf_table = torch.cat([zero_prefix, cumsum_probs], dim=-1)
+        base_cdf = self._gather_from_bins(base_cdf_table, bin_indices, num_sample_dims, value_prep.shape)
 
-        # Clamp to valid range [0, num_bins - 1].
-        bin_indices_active = torch.clamp(bin_indices_active, 0, self.num_bins - 1)
+        # Interpolate: cdf = base_cdf + (value - left_edge) * (mass / width)
+        alpha = (value_prep - left_edges) / (widths + 2 * widths.dtype.eps)
+        alpha = torch.clamp(alpha, 0.0, 1.0)  # prevent extrapolation
+        cdf_vals = base_cdf + alpha * masses
+        return cdf_vals
 
-        # Gather left edges, bin widths, and bin probabilities
-        left_edges = self.bin_edges[bin_indices_active]
-        bin_widths_selected = self.bin_widths[bin_indices_active]
+    def icdf(self, value: torch.Tensor) -> torch.Tensor:
+        """Compute the inverse CDF, i.e., the quantile function, at the given values.
 
-        num_sample_dims = len(bin_indices_active.shape) - len(self.batch_shape)
+        Args:
+            value: Values in [0, 1] at which to compute the inverse CDF.
+                Expected shape: (*sample_shape, *batch_shape) or broadcastable to it.
 
-        # Compute base CDF values at left edges (y0)
-        cumsum_probs = torch.cumsum(self.bin_probs, dim=-1)  # shape: (*batch_shape, num_bins)
-        cumsum_probs = torch.cat(
-            [torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device), cumsum_probs],
-            dim=-1,
-        )  # shape: (*batch_shape, num_bins + 1)
+        Returns:
+            Quantiles in [bound_low, bound_up] corresponding to the input CDF values.
+            Output shape: same as `value` shape after broadcasting, i.e., (*sample_shape, *batch_shape).
+        """
+        if self._validate_args:
+            raise ValueError("icdf input must be in [0, 1]")
 
-        # Expand cumsum_probs to match sample dimensions and gather.
-        cumsum_probs_for_gather = cumsum_probs.view((1,) * num_sample_dims + cumsum_probs.shape)
-        cumsum_probs_for_gather = cumsum_probs_for_gather.expand(*bin_indices_active.shape, -1)
-        base_cdf = torch.gather(cumsum_probs_for_gather, dim=-1, index=bin_indices_active.unsqueeze(-1)).squeeze(-1)
+        value_prep, num_sample_dims = self._prepare_input(value)
 
-        # Gather probability masses for the active bins
-        bin_probs_for_gather = self.bin_probs.view((1,) * num_sample_dims + self.bin_probs.shape)
-        bin_probs_for_gather = bin_probs_for_gather.expand(*bin_indices_active.shape, -1)
-        bin_probs_selected = torch.gather(bin_probs_for_gather, dim=-1, index=bin_indices_active.unsqueeze(-1)).squeeze(
-            -1
+        # Get the CDF edges (y-coordinates of the piecewise linear segments).
+        zero_prefix = torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device)
+        cdf_edges = torch.cat([zero_prefix, torch.cumsum(self.bin_probs, dim=-1)], dim=-1)
+
+        # Find the bin in probability space.
+        cdf_edges_aligned = (
+            cdf_edges.view((1,) * num_sample_dims + cdf_edges.shape).expand(*value_prep.shape, -1).contiguous()
         )
+        bin_indices = self._get_bin_indices(value_prep.unsqueeze(-1), bin_edges=cdf_edges_aligned)
 
-        # Linear interpolation fraction
-        alpha = (value - left_edges) / bin_widths_selected
-        alpha = torch.clamp(alpha, 0.0, 1.0)
-        cdf_values = base_cdf + alpha * bin_probs_selected
+        # Gather the probability base.
+        base_cdf = self._gather_from_bins(cdf_edges, bin_indices, num_sample_dims, value_prep.shape)
 
-        # Enforce hard boundaries just in case
-        cdf_values = torch.where(value < self.bound_low, torch.zeros_like(cdf_values), cdf_values)
-        cdf_values = torch.where(value >= self.bound_up, torch.ones_like(cdf_values), cdf_values)
+        # Gather the interpolation parameters.
+        left_edges = self._gather_from_bins(self.bin_edges[:-1], bin_indices, num_sample_dims, value_prep.shape)
+        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, value_prep.shape)
+        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, value_prep.shape)
 
-        return cdf_values
+        # Interpolate: x = x0 + (target_y - y0) * (width / mass)
+        # Handle division by zero for bins with no mass
+        slope = widths / (masses + 2 * masses.dtype.eps)
+        interp_value = left_edges + (value_prep - base_cdf) * slope
+
+        quantiles = torch.clamp(interp_value, self.bound_low, self.bound_up)
+
+        return quantiles
+
+    def entropy(self) -> torch.Tensor:
+        r"""Compute differential entropy of the distribution.
+
+        Entropy H(X) = -\sum_{x \in \mathcal{X}} p(x) \log( p(x) )
+
+        Note:
+            Here, we are doing an approximation by treating each bin as a uniform distribution over its width.
+        """
+        bin_probs = self.bin_probs
+
+        # Get the PDF values at bin centers.
+        pdf_values = bin_probs / self.bin_widths  # shape: (*batch_shape, num_bins)
+
+        # Entropy ≈ -∑ p_i * log(pdf_i) * bin_width_i.
+        log_pdf = torch.log(pdf_values + 1e-8)  # small epsilon for stability
+        entropy_per_bin = -bin_probs * log_pdf
+
+        # Sum over bins to get total entropy.
+        return torch.sum(entropy_per_bin, dim=-1)
