@@ -268,6 +268,36 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         return bin_indices
 
+    def _gather_from_bins(
+        self, params: torch.Tensor, bin_indices: torch.Tensor, num_sample_dims: int, target_shape: torch.Size
+    ) -> torch.Tensor:
+        """Gather bin-specific parameters using aligned indices.
+
+        Args:
+            params: Tensor used as the input to gather from, of shape (*batch_shape, num_bins) or
+                (*batch_shape, num_bins + 1).
+            bin_indices: Indices used to gather by, of shape (*sample_shape, *batch_shape).
+            num_sample_dims: Number of leading sample dimensions in the input.
+            target_shape: The shape to expand to, (*sample_shape, *batch_shape).
+
+        Returns:
+            Gathered values of shape (*sample_shape, *batch_shape).
+        """
+        # Add singleton dimensions for sample_shape: (1, ..., 1, *batch_shape, num_bins).
+        params_view = params.view((1,) * num_sample_dims + params.shape)
+
+        # Expand to match the full target shape of the input.
+        params_expanded = params_view.expand(*target_shape, -1)
+
+        # Gather along the last dimension. The index must be unsqueezed if indices doesn't have the bin dim yet.
+        # Use gather with automatic broadcasting. unsqueeze(-1) provides the index dimension,
+        # and squeeze(-1) removes it from the result.
+        if bin_indices.ndim == len(target_shape):
+            bin_indices = bin_indices.unsqueeze(-1)
+        gathered = torch.gather(params_expanded, dim=-1, index=bin_indices).squeeze(-1)
+
+        return gathered
+
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         """Compute log probability density at given values.
 
@@ -286,7 +316,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         bin_indices = self._get_bin_indices(value, bin_edges=self.bin_edges)
 
-        # Calculate log_probs directly for stability
+        # Calculate the log-probabilities directly for stability.
         if self.bin_normalization_method == "sigmoid":
             # Normalized logsigmoid: log(sigmoid(x) / sum(sigmoid(x)))
             log_raw = logsigmoid(self.logits)
@@ -295,13 +325,9 @@ class PiecewiseConstantBinnedCDF(Distribution):
         else:
             log_bin_probs = log_softmax(self.logits, dim=-1)
 
-        log_bin_probs_expanded = log_bin_probs.view((1,) * num_sample_dims + log_bin_probs.shape)
-        log_bin_probs_expanded = log_bin_probs_expanded.expand(*value.shape, -1)
-        # Use gather with automatic broadcasting. unsqueeze(-1) provides the index dimension,
-        # and squeeze(-1) removes it from the result.
-        log_prob = torch.gather(log_bin_probs_expanded, dim=-1, index=bin_indices.unsqueeze(-1)).squeeze(-1)
+        log_probs = self._gather_from_bins(log_bin_probs, bin_indices, num_sample_dims, value.shape)
 
-        return log_prob
+        return log_probs
 
     def prob(self, value: torch.Tensor) -> torch.Tensor:
         """Compute probability density at given values.
@@ -321,13 +347,9 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         bin_indices = self._get_bin_indices(value, bin_edges=self.bin_edges)
 
-        bin_probs_expanded = self.bin_probs.view((1,) * num_sample_dims + self.bin_probs.shape)
-        bin_probs_expanded = bin_probs_expanded.expand(*value.shape, -1)
-        # Use gather with automatic broadcasting. unsqueeze(-1) provides the index dimension,
-        # and squeeze(-1) removes it from the result.
-        bin_probs_selected = torch.gather(bin_probs_expanded, dim=-1, index=bin_indices.unsqueeze(-1)).squeeze(-1)
+        probs = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, value.shape)
 
-        return bin_probs_selected
+        return probs
 
     def cdf(self, value: torch.Tensor) -> torch.Tensor:
         """Compute cumulative distribution function at given values.
@@ -353,11 +375,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         zero_prefix = torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device)
         cumsum_probs = torch.cat([zero_prefix, cumsum_probs], dim=-1)  # shape: (*batch_shape, num_bins + 1)
 
-        cumsum_probs_expanded = cumsum_probs.view((1,) * num_sample_dims + cumsum_probs.shape)
-        cumsum_probs_expanded = cumsum_probs_expanded.expand(*value.shape, -1)
-        # Use gather with automatic broadcasting. unsqueeze(-1) provides the index dimension,
-        # and squeeze(-1) removes it from the result.
-        cdf_values = torch.gather(cumsum_probs_expanded, dim=-1, index=bin_indices.unsqueeze(-1)).squeeze(-1)
+        cdf_values = self._gather_from_bins(cumsum_probs, bin_indices, num_sample_dims, value.shape)
 
         return cdf_values
 
@@ -393,14 +411,8 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         bin_indices = self._get_bin_indices(value.unsqueeze(-1), bin_edges=cdf_edges_expanded)
 
-        # Gather efficiently. We only add singleton dimensions for the sample dimensions, as self.bin_centers
-        # already contains the batch dimensions..
-        bin_centers_expanded = self.bin_centers.view((1,) * num_sample_dims + self.bin_centers.shape)
-        bin_centers_expanded = bin_centers_expanded.expand(*value.shape, -1)
-        # Use gather with automatic broadcasting.
-        quantiles = torch.gather(bin_centers_expanded, dim=-1, index=bin_indices).squeeze(-1)
+        quantiles = self._gather_from_bins(self.bin_centers, bin_indices, num_sample_dims, value.shape)
 
-        # Return the discrete quantiles.
         return quantiles  # shape: (*sample_shape, *batch_shape)
 
     @torch.no_grad()
