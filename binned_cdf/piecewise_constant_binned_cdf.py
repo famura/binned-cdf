@@ -226,6 +226,48 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         return value, num_sample_dims
 
+    def _get_bin_indices(
+        self, value: torch.Tensor, bin_edges: torch.Tensor | None = None, bin_centers: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Get bin indices for the given values using binary search.
+
+        Args:
+            value: Input tensor of shape (*sample_shape, *batch_shape).
+            bin_edges: Tensor of bin edges, of shape (num_bins + 1,). If provided, the bin indices are determined based
+                on the edges.
+            bin_centers: Tensor of bin centers, of shape (num_bins,). If provided, the bin indices are determined based
+                on the centers.
+
+        Returns:
+            Tensor of bin indices for the given values, of shape (*sample_shape, *batch_shape), with values in
+            [0, num_bins - 1] if the bins are defined by their edges or with values in [0, num_bins] if the bins are
+            defined by their centers.
+        """
+        if bin_edges is not None and bin_centers is not None:
+            raise ValueError("Provide either edges or centers as input, not both.")
+
+        # Use binary search to find which bin each value belongs to. The torch.searchsorted function returns the
+        # index where value would be inserted to maintain sorted order.
+        if bin_edges is not None:
+            # Since bins are defined as [edge[i], edge[i+1]), we subtract 1 to get the bin index.
+            bin_indices = torch.searchsorted(bin_edges, value, right=True) - 1
+        elif bin_centers is not None:
+            # If value < first center, returns 0 -> gets 0.0 from cumsum_probs
+            # If value >= last center, returns num_bins -> gets 1.0 from cumsum_probs
+            bin_indices = torch.searchsorted(bin_centers, value, right=True)
+        else:
+            raise ValueError("Either edges or centers must be provided to determine bin indices.")
+
+        # Clamp the output of torch.searchsorted to valid range to handle edge cases:
+        # - values below bound_low would give bin_idx = -1
+        # - values at bound_up would give bin_idx = num_bins
+        if bin_edges is not None:
+            bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
+        elif bin_centers is not None:
+            bin_indices = torch.clamp(bin_indices, 0, self.num_bins)
+
+        return bin_indices
+
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         """Compute log probability density at given values.
 
@@ -242,15 +284,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         value, num_sample_dims = self._prepare_input(value)
 
-        # Use binary search to find which bin each value belongs to. The torch.searchsorted function returns the
-        # index where value would be inserted to maintain sorted order.
-        # Since bins are defined as [edge[i], edge[i+1]), we subtract 1 to get the bin index.
-        bin_indices = torch.searchsorted(self.bin_edges, value, right=True) - 1  # shape: (*sample_shape, *batch_shape)
-
-        # Clamp to valid range [0, num_bins - 1] to handle edge cases:
-        # - values below bound_low would give bin_idx = -1
-        # - values at bound_up would give bin_idx = num_bins
-        bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
+        bin_indices = self._get_bin_indices(value, bin_edges=self.bin_edges)
 
         # Calculate log_probs directly for stability
         if self.bin_normalization_method == "sigmoid":
@@ -285,15 +319,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         value, num_sample_dims = self._prepare_input(value)
 
-        # Use binary search to find which bin each value belongs to. The torch.searchsorted function returns the
-        # index where value would be inserted to maintain sorted order.
-        # Since bins are defined as [edge[i], edge[i+1]), we subtract 1 to get the bin index.
-        bin_indices = torch.searchsorted(self.bin_edges, value, right=True) - 1  # shape: (*sample_shape, *batch_shape)
-
-        # Clamp to valid range [0, num_bins - 1] to handle edge cases:
-        # - values below bound_low would give bin_idx = -1
-        # - values at bound_up would give bin_idx = num_bins
-        bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
+        bin_indices = self._get_bin_indices(value, bin_edges=self.bin_edges)
 
         bin_probs_expanded = self.bin_probs.view((1,) * num_sample_dims + self.bin_probs.shape)
         bin_probs_expanded = bin_probs_expanded.expand(*value.shape, -1)
@@ -319,14 +345,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         value, num_sample_dims = self._prepare_input(value)
 
-        # Use binary search to find how many bin centers are <= value.
-        # torch.searchsorted with right=True gives us the number of elements <= value.
-        # If value < first center, returns 0 -> gets 0.0 from cumsum_probs
-        # If value >= last center, returns num_bins -> gets 1.0 from cumsum_probs
-        bin_indices = torch.searchsorted(self.bin_centers, value, right=True)
-
-        # Clamp to valid range [0, num_bins].
-        bin_indices = torch.clamp(bin_indices, 0, self.num_bins)  # shape: (*sample_shape, *batch_shape)
+        bin_indices = self._get_bin_indices(value, bin_centers=self.bin_centers)
 
         # Compute the cumulative sum of bin probabilities.
         # Prepend 0 for the case where no bins are active.
@@ -372,14 +391,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         cdf_edges_expanded = cdf_edges_expanded.expand(*value.shape, -1)
         cdf_edges_expanded = cdf_edges_expanded.contiguous()
 
-        # Find bins containing the value using binary search instead of a mask.
-        # right=True ensures that value=1.0 is handled correctly by selecting the last bin.
-        bin_indices = torch.searchsorted(cdf_edges_expanded, value.unsqueeze(-1), right=True) - 1
-
-        # Clamp to valid range [0, num_bins - 1] to handle edge cases:
-        # - values below bound_low would give bin_idx = -1
-        # - values at bound_up would give bin_idx = num_bins
-        bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
+        bin_indices = self._get_bin_indices(value.unsqueeze(-1), bin_edges=cdf_edges_expanded)
 
         # Gather efficiently. We only add singleton dimensions for the sample dimensions, as self.bin_centers
         # already contains the batch dimensions..
