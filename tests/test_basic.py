@@ -195,10 +195,10 @@ def test_prob_random_logits(
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
-    dist = distr_class(logits, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method)
+    distr = distr_class(logits, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method)
 
     # Define expected shapes based on batch_size. The bins go into the sample shape.
-    bin_centers = dist.bin_centers
+    bin_centers = distr.bin_centers
     if batch_size is not None:
         # Expand to (num_bins, batch_size) for batched distributions.
         bin_centers = bin_centers.unsqueeze(1).expand(num_bins, batch_size)
@@ -208,19 +208,83 @@ def test_prob_random_logits(
         expected_probs_shape: tuple[int, ...] = (num_bins,)  # type: ignore[no-redef]
 
     # Test probability computation at bin centers.
-    probs_at_centers = dist.log_prob(bin_centers)
+    probs_at_centers = distr.log_prob(bin_centers)
     assert probs_at_centers.device == device
     assert torch.all(torch.isfinite(probs_at_centers)), "log_prob at bin centers should be finite"
     assert probs_at_centers.shape == expected_probs_shape
 
     # Test probability at bounds - should be finite but may be low
     expected_scalar_shape = torch.Size([]) if batch_size is None else torch.Size([batch_size])
-    prob_at_low = dist.log_prob(torch.tensor(dist.bound_low, device=device))
-    prob_at_up = dist.log_prob(torch.tensor(dist.bound_up, device=device))
+    prob_at_low = distr.log_prob(torch.tensor(distr.bound_low, device=device))
+    prob_at_up = distr.log_prob(torch.tensor(distr.bound_up, device=device))
     assert torch.all(torch.isfinite(prob_at_low)), f"log_prob at lower bound should be finite: {prob_at_low}"
     assert torch.all(torch.isfinite(prob_at_up)), f"log_prob at upper bound should be finite: {prob_at_up}"
     assert prob_at_low.shape == expected_scalar_shape
     assert prob_at_up.shape == expected_scalar_shape
+
+
+@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("batch_size", [None, 1, 8])
+@pytest.mark.parametrize("num_bins", [2, 200])  # 2 is an edge case for log-spacing
+@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
+@pytest.mark.parametrize("bin_normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize(
+    "use_cuda",
+    [
+        pytest.param(False, id="cpu"),
+        pytest.param(True, marks=needs_cuda, id="cuda"),
+    ],
+)
+def test_prob(
+    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
+    batch_size: int | None,
+    num_bins: int,
+    log_spacing: bool,
+    bin_normalization_method: Literal["sigmoid", "softmax"],
+    use_cuda: bool,
+):
+    """Test prob() returns valid densities and is consistent with log_prob()."""
+    torch.manual_seed(42)
+
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
+    logits = logits.to(device)
+    distr = distr_class(logits, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method)
+
+    # Evaluate at bin centers.
+    bin_centers = distr.bin_centers
+    if batch_size is not None:
+        bin_centers = bin_centers.unsqueeze(1).expand(num_bins, batch_size)
+        expected_shape: tuple[int, ...] = (num_bins, batch_size)
+    else:
+        expected_shape: tuple[int, ...] = (num_bins,)  # type: ignore[no-redef]
+
+    prob_vals = distr.prob(bin_centers)
+    assert prob_vals.device == device
+    assert prob_vals.shape == expected_shape
+    assert torch.all(prob_vals >= 0), "prob() must be non-negative"
+    assert torch.all(torch.isfinite(prob_vals)), "prob() at bin centers should be finite"
+
+    # prob() and log_prob() must be consistent: prob == exp(log_prob).
+    log_prob_vals = distr.log_prob(bin_centers)
+    assert torch.allclose(prob_vals, torch.exp(log_prob_vals), atol=1e-5), "prob() and exp(log_prob()) should match"
+
+    # Evaluate at the bounds.
+    expected_scalar_shape = torch.Size([]) if batch_size is None else torch.Size([batch_size])
+    prob_at_low = distr.prob(torch.tensor(distr.bound_low, device=device))
+    prob_at_up = distr.prob(torch.tensor(distr.bound_up, device=device))
+    assert prob_at_low.shape == expected_scalar_shape
+    assert prob_at_up.shape == expected_scalar_shape
+    assert torch.all(prob_at_low >= 0)
+    assert torch.all(prob_at_up >= 0)
+    assert torch.all(torch.isfinite(prob_at_low))
+    assert torch.all(torch.isfinite(prob_at_up))
+
+    # Consistency at bounds too.
+    log_prob_at_low = distr.log_prob(torch.tensor(distr.bound_low, device=device))
+    log_prob_at_up = distr.log_prob(torch.tensor(distr.bound_up, device=device))
+    assert torch.allclose(prob_at_low, torch.exp(log_prob_at_low), atol=1e-5)
+    assert torch.allclose(prob_at_up, torch.exp(log_prob_at_up), atol=1e-5)
 
 
 @pytest.mark.parametrize(
@@ -260,7 +324,7 @@ def test_shannon_entropy(
     bound_low, bound_up = target_dist_params["bounds"]
 
     # Create target distribution.
-    target_dist = dist_class(**dist_params)
+    target_distr = dist_class(**dist_params)
 
     # Use the PiecewiseConstantBinnedCDF's own bin construction to ensure matching shapes between distributions.
     _, bin_centers, bin_widths = PiecewiseConstantBinnedCDF._create_bins(
@@ -273,7 +337,7 @@ def test_shannon_entropy(
     )
 
     # Compute target probabilities at bin centers, and normalize to get probability masses for each bin.
-    target_probs = torch.exp(target_dist.log_prob(bin_centers))
+    target_probs = torch.exp(target_distr.log_prob(bin_centers))
     target_prob_masses = target_probs * bin_widths
     target_prob_masses = target_prob_masses / target_prob_masses.sum()
 
@@ -342,8 +406,8 @@ def test_differential_entropy(
     rel_tol = target_dist_params["rel_tol"]
 
     # Create target distribution, and get the entropy.
-    target_dist = dist_class(**dist_params)
-    target_entropy = target_dist.entropy().item()
+    target_distr = dist_class(**dist_params)
+    target_entropy = target_distr.entropy().item()
 
     # Use the PiecewiseLinearBinnedCDF's own bin construction to ensure matching shapes between distributions.
     _, bin_centers, bin_widths = PiecewiseLinearBinnedCDF._create_bins(
@@ -356,7 +420,7 @@ def test_differential_entropy(
     )
 
     # Compute target probabilities at bin centers, and normalize to get probability masses for each bin.
-    target_probs = torch.exp(target_dist.log_prob(bin_centers))
+    target_probs = torch.exp(target_distr.log_prob(bin_centers))
     target_prob_masses = target_probs * bin_widths
     target_prob_masses = target_prob_masses / target_prob_masses.sum()
 
