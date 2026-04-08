@@ -37,12 +37,30 @@ suitable for uncertainty estimation, probabilistic prediction, and distributiona
 
 ## Implementation
 
-The `BinnedLogitCDF` class inherits directly from `torch.distributions.Distribution`, implementing all necessary
-methods plus some convenience functions.
-It supports multi-dimensional batch shapes and CUDA devices.
+The `PiecewiseConstantBinnedCDF` and `PiecewiseLinearBinnedCDF` classes inherit directly from
+`torch.distributions.Distribution`, implementing all necessary methods plus some convenience functions.
+They support multi-dimensional batch shapes and CUDA devices.
 The bins can be initialized linearly or log-spaced.
 
 `torch>=2.7` it the only non-dev dependency of this repo.
+
+## Getting Started
+
+I recommend using `PiecewiseLinearBinnedCDF` for most applications.
+
+```python
+from binned_cdf import PiecewiseLinearBinnedCDF
+
+distr = PiecewiseLinearBinnedCDF(
+    logits=logits,  # shape: (*batch_shape, num_bins)
+    bound_low=-5,  # adapt to your data
+    bound_up=7,  # adapt to your data
+    log_spacing=True,  # if False, linear spacing is used
+    bin_normalization_method="sigmoid",  # "sigmoid" or "softmax"
+)
+
+# ... use it like any other torch.distribution.Distribution
+```
 
 :point_right: **Please have a look at the [documentation][docs] to get started.**
 

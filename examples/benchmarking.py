@@ -5,7 +5,7 @@ from typing import Any
 import torch
 import torch.utils.benchmark as benchmark
 
-from binned_cdf.binned_logit_cdf import BinnedLogitCDF
+from binned_cdf import PiecewiseLinearBinnedCDF
 
 
 def measure_performance(
@@ -71,12 +71,13 @@ def report_results(results: dict[str, tuple[float, int]]) -> None:
         print(f"{op:<16} | {time_ms:<16.4f} | {mem_mb:<16.4f}")
 
 
-def benchmark_shape(shape: tuple[int, ...], num_bins: int = 32, num_iter: int = 100) -> None:
-    """Benchmarks several function of the BinnedLogitCDF class for a specific logit shape.
+def benchmark_shape(distr_class: type, shape: tuple[int, ...], num_bins: int = 32, num_iter: int = 100) -> None:
+    """Benchmarks several function of the PiecewiseConstantBinnedCDF (sub)class for a specific logit shape.
 
     This function measures the average time and memory usage.
 
     Args:
+        distr_class: The distribution class to benchmark: PiecewiseConstantBinnedCDF or PiecewiseLinearBinnedCDF.
         shape: A tuple of integers defining the shape of the input logits tensor.
         num_bins: The number of bins to use for the CDF.
         num_iter: The number of iterations to run for estimating the timing results.
@@ -87,15 +88,15 @@ def benchmark_shape(shape: tuple[int, ...], num_bins: int = 32, num_iter: int = 
     logits = torch.randn(*shape)
     y = torch.randn(shape[:-1])
     quantiles = torch.rand_like(y)
-    dist = BinnedLogitCDF(logits)  # instantiate once for forward testing
+    distr = PiecewiseLinearBinnedCDF(logits)  # instantiate once for forward testing
 
     # Run benchmarks.
     results = {}
-    results["__init__"] = measure_performance(BinnedLogitCDF, logits, num_iter_measure=num_iter)
-    results["prob"] = measure_performance(dist.prob, y, num_iter_measure=num_iter)
-    results["cdf"] = measure_performance(dist.cdf, y, num_iter_measure=num_iter)
-    results["icdf"] = measure_performance(dist.icdf, quantiles, num_iter_measure=num_iter)
-    results["sample"] = measure_performance(dist.sample, num_iter_measure=num_iter)
+    results["__init__"] = measure_performance(PiecewiseLinearBinnedCDF, logits, num_iter_measure=num_iter)
+    results["prob"] = measure_performance(distr.prob, y, num_iter_measure=num_iter)
+    results["cdf"] = measure_performance(distr.cdf, y, num_iter_measure=num_iter)
+    results["icdf"] = measure_performance(distr.icdf, quantiles, num_iter_measure=num_iter)
+    results["sample"] = measure_performance(distr.sample, num_iter_measure=num_iter)
 
     # Report results.
     report_results(results)
@@ -115,9 +116,10 @@ if __name__ == "__main__":
         (1, 512, 512),  # single image-like
         (10, 512, 512),  # batch image-like
     ]
+    distr_class = PiecewiseLinearBinnedCDF
 
     for shape in test_shapes:
         try:
-            benchmark_shape(shape)
+            benchmark_shape(distr_class, shape)
         except Exception as e:
             print(f"Failed to benchmark shape {shape}: {e}\n")

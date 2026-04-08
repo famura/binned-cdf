@@ -3,12 +3,13 @@ from typing import Literal
 
 import torch
 from torch.distributions import Distribution, constraints
+from torch.nn.functional import log_softmax, logsigmoid
 
 _size = torch.Size()
 
 
-class BinnedLogitCDF(Distribution):
-    """A histogram-based probability distribution parameterized by a bins for the CDF.
+class PiecewiseConstantBinnedCDF(Distribution):
+    """A discrete probability distribution parameterized by binned logits for the CDF.
 
     Each bin contributes a step function to the CDF when active.
     The activation of each bin is determined by applying a sigmoid to the corresponding logit.
@@ -137,12 +138,12 @@ class BinnedLogitCDF(Distribution):
 
     @property
     def num_bins(self) -> int:
-        """Number of bins making up the BinnedLogitCDF."""
+        """Number of bins making up the PiecewiseConstantBinnedCDF."""
         return self.logits.shape[-1]
 
     @property
     def num_edges(self) -> int:
-        """Number of bins edges of the BinnedLogitCDF."""
+        """Number of bins edges of the PiecewiseConstantBinnedCDF."""
         return self.bin_edges.shape[0]
 
     @property
@@ -183,10 +184,10 @@ class BinnedLogitCDF(Distribution):
 
     def expand(
         self, batch_shape: torch.Size | list[int] | tuple[int, ...], _instance: Distribution | None = None
-    ) -> "BinnedLogitCDF":
+    ) -> "PiecewiseConstantBinnedCDF":
         """Expand distribution to new batch shape. This creates a new instance."""
         expanded_logits = self.logits.expand((*torch.Size(batch_shape), self.num_bins))
-        return BinnedLogitCDF(
+        return self.__class__(
             logits=expanded_logits,
             bound_low=self.bound_low,
             bound_up=self.bound_up,
@@ -194,8 +195,111 @@ class BinnedLogitCDF(Distribution):
             validate_args=self._validate_args,
         )
 
+    def _prepare_input(self, value: torch.Tensor) -> tuple[torch.Tensor, int]:
+        """Prepare the input tensor for `log_prob`, `prob`, `cdf` and `icdf` computations.
+
+        This method handles device/dtype transfer, batch dimension alignment, and broadcasting.
+
+        Args:
+            value: Input tensor to prepare. Expected shape: `(*sample_shape, *batch_shape)` or broadcastable to it.
+                For example, if `batch_shape` is `(B1, B2)` and `value` is `(S1, S2)`, it will be broadcast to
+                `(S1, S2, B1, B2)`. If `value` is `(B1, B2)` (no sample dims), it remains `(B1, B2)`.
+
+        Returns:
+            A tuple containing:
+            - Prepared `value` tensor, of shape: `(*sample_shape, *batch_shape)`.
+            - `num_sample_dims`: The number of sample dimensions in the prepared `value` tensor.
+        """
+        value = value.to(dtype=self.logits.dtype, device=self.logits.device)
+
+        # This ensures the batch dimension is the last dimension.
+        if len(self.batch_shape) > 0:  # noqa: SIM102
+            # Check if the rightmost dimensions of value match batch_shape.
+            # If they don't, we assume value is missing the batch dimensions.
+            if value.shape[-len(self.batch_shape) :] != self.batch_shape:
+                value = value.unsqueeze(-1)
+
+        num_sample_dims = max(0, value.ndim - len(self.batch_shape))
+        target_shape = torch.Size(value.shape[:num_sample_dims]) + self.batch_shape
+        value = value.expand(target_shape)
+        value = value.contiguous()  # for searchsorted later
+
+        return value, num_sample_dims
+
+    def _get_bin_indices(
+        self, value: torch.Tensor, bin_edges: torch.Tensor | None = None, bin_centers: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Get bin indices for the given values using binary search.
+
+        Args:
+            value: Input tensor of shape (*sample_shape, *batch_shape).
+            bin_edges: Tensor of bin edges, of shape (num_bins + 1,). If provided, the bin indices are determined based
+                on the edges.
+            bin_centers: Tensor of bin centers, of shape (num_bins,). If provided, the bin indices are determined based
+                on the centers.
+
+        Returns:
+            Tensor of bin indices for the given values, of shape (*sample_shape, *batch_shape), with values in
+            [0, num_bins - 1] if the bins are defined by their edges or with values in [0, num_bins] if the bins are
+            defined by their centers.
+        """
+        if bin_edges is not None and bin_centers is not None:
+            raise ValueError("Provide either edges or centers as input, not both.")
+
+        # Use binary search to find which bin each value belongs to. The torch.searchsorted function returns the
+        # index where value would be inserted to maintain sorted order.
+        if bin_edges is not None:
+            # Since bins are defined as [edge[i], edge[i+1]), we subtract 1 to get the bin index.
+            bin_indices = torch.searchsorted(bin_edges, value, right=True) - 1
+        elif bin_centers is not None:
+            # If value < first center, returns 0 -> gets 0.0 from cumsum_probs
+            # If value >= last center, returns num_bins -> gets 1.0 from cumsum_probs
+            bin_indices = torch.searchsorted(bin_centers, value, right=True)
+        else:
+            raise ValueError("Either edges or centers must be provided to determine bin indices.")
+
+        # Clamp the output of torch.searchsorted to valid range to handle edge cases:
+        # - values below bound_low would give bin_idx = -1
+        # - values at bound_up would give bin_idx = num_bins
+        if bin_edges is not None:
+            bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
+        elif bin_centers is not None:
+            bin_indices = torch.clamp(bin_indices, 0, self.num_bins)
+
+        return bin_indices
+
+    def _gather_from_bins(
+        self, params: torch.Tensor, bin_indices: torch.Tensor, num_sample_dims: int, target_shape: torch.Size
+    ) -> torch.Tensor:
+        """Gather bin-specific parameters using aligned indices.
+
+        Args:
+            params: Tensor used as the input to gather from, of shape (*batch_shape, num_bins) or
+                (*batch_shape, num_bins + 1).
+            bin_indices: Indices used to gather by, of shape (*sample_shape, *batch_shape).
+            num_sample_dims: Number of leading sample dimensions in the input.
+            target_shape: The shape to expand to, (*sample_shape, *batch_shape).
+
+        Returns:
+            Gathered values of shape (*sample_shape, *batch_shape).
+        """
+        # Add singleton dimensions for sample_shape: (1, ..., 1, *batch_shape, num_bins).
+        params_view = params.view((1,) * num_sample_dims + params.shape)
+
+        # Expand to match the full target shape of the input.
+        params_expanded = params_view.expand(*target_shape, -1)
+
+        # Gather along the last dimension. The index must be unsqueezed if indices doesn't have the bin dim yet.
+        # Use gather with automatic broadcasting. unsqueeze(-1) provides the index dimension,
+        # and squeeze(-1) removes it from the result.
+        if bin_indices.ndim == len(target_shape):
+            bin_indices = bin_indices.unsqueeze(-1)
+        gathered = torch.gather(params_expanded, dim=-1, index=bin_indices).squeeze(-1)
+
+        return gathered
+
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        """Compute log probability density at given values.
+        """Compute the log-probability density at given values.
 
         Args:
             value: Values at which to compute the log PDF.
@@ -205,7 +309,25 @@ class BinnedLogitCDF(Distribution):
             Log PDF values corresponding to the input values.
             Output shape: same as `value` shape after broadcasting, i.e., (*sample_shape, *batch_shape).
         """
-        return torch.log(self.prob(value) + 1e-8)  # small epsilon for stability
+        if self._validate_args:
+            self._validate_sample(value)
+
+        value_prep, num_sample_dims = self._prepare_input(value)
+
+        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
+
+        # Calculate the log-probabilities directly for stability.
+        if self.bin_normalization_method == "sigmoid":
+            # Normalized logsigmoid: log(sigmoid(x) / sum(sigmoid(x)))
+            log_raw = logsigmoid(self.logits)
+            log_normalization = torch.logsumexp(log_raw, dim=-1, keepdim=True)
+            log_bin_probs = log_raw - log_normalization
+        else:
+            log_bin_probs = log_softmax(self.logits, dim=-1)
+
+        log_probs = self._gather_from_bins(log_bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+
+        return log_probs
 
     def prob(self, value: torch.Tensor) -> torch.Tensor:
         """Compute probability density at given values.
@@ -221,42 +343,13 @@ class BinnedLogitCDF(Distribution):
         if self._validate_args:
             self._validate_sample(value)
 
-        value = value.to(dtype=self.logits.dtype, device=self.logits.device)
+        value_prep, num_sample_dims = self._prepare_input(value)
 
-        # Explicitly broadcast value to batch_shape if needed (e.g., scalar inputs with batched distributions).
-        if len(self.batch_shape) > 0 and value.ndim < len(self.batch_shape):
-            value = value.expand(self.batch_shape)
+        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
-        # Use binary search to find which bin each value belongs to. The torch.searchsorted function returns the
-        # index where value would be inserted to maintain sorted order.
-        # Since bins are defined as [edge[i], edge[i+1]), we subtract 1 to get the bin index.
-        value = value.contiguous()
-        bin_indices = torch.searchsorted(self.bin_edges, value) - 1  # shape: (*sample_shape, *batch_shape)
+        probs = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
 
-        # Clamp to valid range [0, num_bins - 1] to handle edge cases:
-        # - values below bound_low would give bin_idx = -1
-        # - values at bound_up would give bin_idx = num_bins
-        bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
-
-        # Gather the bin widths and probabilities for the selected bins.
-        # For bin_widths of shape (num_bins,) we can index directly.
-        bin_widths_selected = self.bin_widths[bin_indices]  # shape: (*sample_shape, *batch_shape)
-
-        # For bin_probs of shape (*batch_shape, num_bins) we need to use gather along the last dimension.
-        # Add sample dimensions to bin_probs and expand to match bin_indices shape.
-        num_sample_dims = len(bin_indices.shape) - len(self.batch_shape)
-        bin_probs_for_gather = self.bin_probs.view((1,) * num_sample_dims + self.bin_probs.shape)
-        bin_probs_for_gather = bin_probs_for_gather.expand(
-            *bin_indices.shape, -1
-        )  # shape: (*sample_shape, *batch_shape, num_bins)
-
-        # Gather the selected bin probabilities.
-        bin_indices_for_gather = bin_indices.unsqueeze(-1)  # shape: (*sample_shape, *batch_shape, 1)
-        bin_probs_selected = torch.gather(bin_probs_for_gather, dim=-1, index=bin_indices_for_gather)
-        bin_probs_selected = bin_probs_selected.squeeze(-1)
-
-        # Compute PDF = probability mass / bin width.
-        return bin_probs_selected / bin_widths_selected
+        return probs
 
     def cdf(self, value: torch.Tensor) -> torch.Tensor:
         """Compute cumulative distribution function at given values.
@@ -272,35 +365,17 @@ class BinnedLogitCDF(Distribution):
         if self._validate_args:
             self._validate_sample(value)
 
-        value = value.to(dtype=self.logits.dtype, device=self.logits.device)
+        value_prep, num_sample_dims = self._prepare_input(value)
 
-        # Explicitly broadcast value to batch_shape if needed (e.g., scalar inputs with batched distributions).
-        if len(self.batch_shape) > 0 and value.ndim < len(self.batch_shape):
-            value = value.expand(self.batch_shape)
+        bin_indices = self._get_bin_indices(value_prep, bin_centers=self.bin_centers)
 
-        # Use binary search to find how many bin centers are <= value.
-        # torch.searchsorted with right=True gives us the number of elements <= value.
-        value = value.contiguous()
-        num_bins_active = torch.searchsorted(self.bin_centers, value, right=True)
-
-        # Clamp to valid range [0, num_bins].
-        num_bins_active = torch.clamp(num_bins_active, 0, self.num_bins)  # shape: (*sample_shape, *batch_shape)
-
-        # Compute cumulative sum of bin probabilities.
+        # Compute the cumulative sum of bin probabilities.
         # Prepend 0 for the case where no bins are active.
-        num_sample_dims = len(num_bins_active.shape) - len(self.batch_shape)
         cumsum_probs = torch.cumsum(self.bin_probs, dim=-1)  # shape: (*batch_shape, num_bins)
-        cumsum_probs = torch.cat(
-            [torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device), cumsum_probs],
-            dim=-1,
-        )  # shape: (*batch_shape, num_bins + 1)
+        zero_prefix = torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device)
+        cumsum_probs = torch.cat([zero_prefix, cumsum_probs], dim=-1)  # shape: (*batch_shape, num_bins + 1)
 
-        # Expand cumsum_probs to match sample dimensions and gather.
-        cumsum_probs_for_gather = cumsum_probs.view((1,) * num_sample_dims + cumsum_probs.shape)
-        cumsum_probs_for_gather = cumsum_probs_for_gather.expand(*num_bins_active.shape, -1)
-        num_bins_active_for_gather = num_bins_active.unsqueeze(-1)  # shape: (*sample_shape, *batch_shape, 1)
-        cdf_values = torch.gather(cumsum_probs_for_gather, dim=-1, index=num_bins_active_for_gather)
-        cdf_values = cdf_values.squeeze(-1)
+        cdf_values = self._gather_from_bins(cumsum_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
 
         return cdf_values
 
@@ -315,60 +390,32 @@ class BinnedLogitCDF(Distribution):
             Quantiles in [bound_low, bound_up] corresponding to the input CDF values.
             Output shape: same as `value` shape after broadcasting, i.e., (*sample_shape, *batch_shape).
         """
-        if self._validate_args and not (value >= 0).all() and (value <= 1).all():
-            raise ValueError("icdf input must be in [0, 1]")
+        if self._validate_args:
+            self._validate_sample(value)
 
-        value = value.to(dtype=self.logits.dtype, device=self.logits.device)
+        value_prep, num_sample_dims = self._prepare_input(value)
 
-        # Compute CDF at bin edges. prepend zeros to the cumsum of probabilities as this is always the first edge.
+        # Compute CDF at bin edges. Prepend zeros to the cumsum of probabilities as this is always the first edge.
         cdf_edges = torch.cat(
             [
                 torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device),
                 torch.cumsum(self.bin_probs, dim=-1),  # shape: (*batch_shape, num_bins)
             ],
             dim=-1,
-        )  # shape: (*batch_shape, num_bins + 1)
+        )  # [0, p1, p1+p2, ..., 1.0], shape: (*batch_shape, num_bins + 1)
 
-        # Determine number of sample dimensions (dimensions before batch_shape).
-        num_sample_dims = len(value.shape) - len(self.batch_shape)
+        # Prepend singleton dimensions for sample_shape to cdf_edges and expand to match value.
+        cdf_edges_expanded = cdf_edges.view((1,) * num_sample_dims + cdf_edges.shape)
+        cdf_edges_expanded = cdf_edges_expanded.expand(*value_prep.shape, -1)
+        cdf_edges_expanded = cdf_edges_expanded.contiguous()
 
-        # Prepend singleton dimensions for sample_shape to cdf_edges.
-        # cdf_edges: (*batch_shape, num_bins + 1) -> (*sample_shape, *batch_shape, num_bins + 1)
-        cdf_edges = cdf_edges.view((1,) * num_sample_dims + cdf_edges.shape)
+        bin_indices = self._get_bin_indices(value_prep.unsqueeze(-1), bin_edges=cdf_edges_expanded)
 
-        # Prepend singleton dimensions for  both sample_shape and batch_shape.
-        # bin_edges: (num_bins + 1,) -> (*sample_shape, *batch_shape, num_bins + 1)
-        bin_edges_expanded = self.bin_edges.view(
-            (1,) * (num_sample_dims + len(self.batch_shape)) + self.bin_edges.shape
+        quantiles = self._gather_from_bins(
+            self.bin_centers, bin_indices, num_sample_dims, target_shape=value_prep.shape
         )
 
-        # Add bin dimension to value for comparison.
-        value_expanded = value.unsqueeze(-1)
-
-        # Find bins containing the value: left_cdf <= value < right_cdf.
-        bin_mask = (cdf_edges[..., :-1] <= value_expanded) & (value_expanded < cdf_edges[..., 1:])
-        bin_mask = bin_mask.to(self.logits.dtype)
-
-        # Handle edge case where value ≈ 1.0 (use isclose with dtype-appropriate defaults).
-        value_is_one = torch.isclose(value_expanded, torch.ones_like(value_expanded))
-        bin_mask[..., -1] = torch.max(bin_mask[..., -1], value_is_one[..., 0])  # last bin could be selected already
-
-        # Selected the correct bin edges using the mask. Summing is essentially selecting here.
-        # Summing fast and differentiable.
-        cfd_value_bin_starts = torch.sum(bin_mask * cdf_edges[..., :-1], dim=-1)
-        cdf_value_bin_ends = torch.sum(bin_mask * cdf_edges[..., 1:], dim=-1)
-        bin_left_edges = torch.sum(bin_mask * bin_edges_expanded[..., :-1], dim=-1)
-        bin_right_edges = torch.sum(bin_mask * bin_edges_expanded[..., 1:], dim=-1)
-
-        # Avoid division by zero.
-        bin_width = cdf_value_bin_ends - cfd_value_bin_starts
-        safe_bin_width = torch.where(bin_width > 1e-8, bin_width, torch.ones_like(bin_width))
-
-        # Linear interpolation within the bin.
-        alpha = (value - cfd_value_bin_starts) / safe_bin_width
-        quantiles = bin_left_edges + alpha * (bin_right_edges - bin_left_edges)
-
-        return quantiles
+        return quantiles  # shape: (*sample_shape, *batch_shape)
 
     @torch.no_grad()
     def sample(self, sample_shape: torch.Size | list[int] | tuple[int, ...] = _size) -> torch.Tensor:
@@ -385,24 +432,18 @@ class BinnedLogitCDF(Distribution):
         return self.icdf(uniform_samples)
 
     def entropy(self) -> torch.Tensor:
-        r"""Compute differential entropy of the distribution.
+        r"""Compute Shannon entropy of the discrete distribution.
 
-        Entropy H(X) = -\sum_{x \in \mathcal{X}} p(x) \log( p(x) )
-
-        Note:
-            Here, we are doing an approximation by treating each bin as a uniform distribution over its width.
+        $$H(X) = -\sum_{i=1}^{n} p_i \log p_i$$
+        where $p_i$ is the probability mass of bin $i$.
         """
         bin_probs = self.bin_probs
 
-        # Get the PDF values at bin centers.
-        pdf_values = bin_probs / self.bin_widths  # shape: (*batch_shape, num_bins)
-
-        # Entropy ≈ -∑ p_i * log(pdf_i) * bin_width_i.
-        log_pdf = torch.log(pdf_values + 1e-8)  # small epsilon for stability
-        entropy_per_bin = -bin_probs * log_pdf
+        # Compute entropy per bin and sum over bins. Add small epsilon for numerical stability in log.
+        entropy_per_bin = bin_probs * torch.log(bin_probs + 1e-8)  # shape: (*batch_shape, num_bins)
 
         # Sum over bins to get total entropy.
-        return torch.sum(entropy_per_bin, dim=-1)
+        return -torch.sum(entropy_per_bin, dim=-1)
 
     def __repr__(self) -> str:
         """String representation of the distribution."""
