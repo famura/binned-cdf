@@ -390,8 +390,8 @@ class PiecewiseConstantBinnedCDF(Distribution):
             Quantiles in [bound_low, bound_up] corresponding to the input CDF values.
             Output shape: same as `value` shape after broadcasting, i.e., (*sample_shape, *batch_shape).
         """
-        if self._validate_args and not (value >= 0).all() and (value <= 1).all():
-            raise ValueError("icdf input must be in [0, 1]")
+        if self._validate_args:
+            self._validate_sample(value)
 
         value_prep, num_sample_dims = self._prepare_input(value)
 
