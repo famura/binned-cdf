@@ -4,7 +4,8 @@ from typing import Any
 
 import torch
 import torch.utils.benchmark as benchmark
-from binned_cdf.binned_logit_cdf import PiecewiseLinearBinnedCDF
+
+from binned_cdf import PiecewiseLinearBinnedCDF
 
 
 def measure_performance(
