@@ -4,13 +4,13 @@ import seaborn as sns
 import torch
 from sklearn.datasets import make_moons
 
-from binned_cdf import PiecewiseConstantBinnedCDF
+from binned_cdf import PiecewiseLinearBinnedCDF
 
 sns.set_theme()
 
 
 class DensityNet(torch.nn.Module):
-    """Neural network for 2D density estimation using PiecewiseConstantBinnedCDF."""
+    """Neural network for 2D density estimation using PiecewiseLinearBinnedCDF."""
 
     def __init__(self, num_bins: int) -> None:
         """Initialize the network.
@@ -28,20 +28,19 @@ class DensityNet(torch.nn.Module):
         )
         self.head = torch.nn.Linear(64, 2 * num_bins)
 
-    def forward(self, x: torch.Tensor) -> PiecewiseConstantBinnedCDF:
+    def forward(self, x: torch.Tensor) -> PiecewiseLinearBinnedCDF:
         """Forward pass to create distribution.
 
         Args:
             x: Input coordinates of shape (batch_size, 2).
 
         Returns:
-            PiecewiseConstantBinnedCDF distribution with batch_shape (batch_size, 2).
+            PiecewiseLinearBinnedCDF distribution with batch_shape (batch_size, 2).
         """
         features = self.shared(x)
         logits = self.head(features)
         logits = logits.reshape(*logits.shape[:-1], 2, self.num_bins)
-        dist = PiecewiseConstantBinnedCDF(logits, bound_low=-2.0, bound_up=3.0)
-        return dist
+        return PiecewiseLinearBinnedCDF(logits, bound_low=-2.0, bound_up=3.0)
 
 
 if __name__ == "__main__":
@@ -64,8 +63,8 @@ if __name__ == "__main__":
     print("Training started.")
     for epoch in range(num_iter):
         optimizer.zero_grad()
-        dist = model(X)
-        log_prob = dist.log_prob(X)
+        distr = model(X)
+        log_prob = distr.log_prob(X)
         loss = -log_prob.sum(dim=-1).mean()
         loss.backward()
         optimizer.step()
@@ -78,8 +77,8 @@ if __name__ == "__main__":
 
     print("Gird evaluation started.")
     with torch.no_grad():
-        dist = model(grid)  # grid shape: (N, 2)
-        probs = dist.prob(grid)  # probs shape: (N, 2)
+        distr = model(grid)  # grid shape: (N, 2)
+        probs = distr.prob(grid)  # probs shape: (N, 2)
         prob_x, prob_y = probs[:, 0], probs[:, 1]
         prob_joint = (prob_x * prob_y).cpu().numpy().reshape(xx.shape)
     print(f"Grid evaluation finished. Evaluation of the joint on the grid has shape {prob_joint.shape}.")
@@ -89,15 +88,15 @@ if __name__ == "__main__":
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     axes[0].contourf(xx, yy, prob_joint, levels=30, cmap="viridis")
     axes[0].scatter(X[:, 0].cpu(), X[:, 1].cpu(), s=4, color="red", alpha=0.3)
-    axes[0].set_title("Estimated Density (PiecewiseConstantBinnedCDF)")
+    axes[0].set_title("Estimated Density (PiecewiseLinearBinnedCDF)")
     axes[0].set_xlabel("x")
     axes[0].set_ylabel("y")
     print("Grid plotting finished.")
 
     print("Sampling started.")
     with torch.no_grad():
-        dist = model(X)  # create distribution for all training data points
-        samples = dist.sample()
+        distr = model(X)  # create distribution for all training data points
+        samples = distr.sample()
     print(f"Sampling finished. Samples have shape {samples.shape}.")
 
     axes[1].scatter(samples[:, 0].cpu().numpy(), samples[:, 1].cpu().numpy(), s=4, alpha=0.5, label="sampled")

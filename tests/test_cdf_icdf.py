@@ -6,10 +6,11 @@ import pytest
 import seaborn as sns
 import torch
 
-from binned_cdf import PiecewiseConstantBinnedCDF
+from binned_cdf import PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
 from tests.conftest import needs_cuda
 
 
+@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("logit_scale", [1e-3, 1, 1e3, 1e9])
 @pytest.mark.parametrize("bin_normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
@@ -22,6 +23,7 @@ from tests.conftest import needs_cuda
     ],
 )
 def test_cdf_random_logits(
+    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     logit_scale: float,
     batch_size: int | None,
     bin_normalization_method: Literal["sigmoid", "softmax"],
@@ -36,11 +38,11 @@ def test_cdf_random_logits(
     logits = logit_scale * torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
 
-    dist = PiecewiseConstantBinnedCDF(logits, bound_low, bound_up, bin_normalization_method=bin_normalization_method)
+    distr = distr_class(logits, bound_low, bound_up, bin_normalization_method=bin_normalization_method)
 
     # Evaluate the CDF at the bounds.
-    cdf_low = dist.cdf(torch.tensor(bound_low))
-    cdf_up = dist.cdf(torch.tensor(bound_up))
+    cdf_low = distr.cdf(torch.tensor(bound_low))
+    cdf_up = distr.cdf(torch.tensor(bound_up))
 
     # Check the values at the bounds.
     assert torch.all(cdf_low <= 1.0 / num_bins), f"CDF at lower bound not <= 1/num_bins: {cdf_low}"
@@ -48,7 +50,7 @@ def test_cdf_random_logits(
 
     if plot and batch_size is None:
         x = torch.linspace(bound_low, bound_up, 2000)
-        cdf_vals = dist.cdf(x)
+        cdf_vals = distr.cdf(x)
         plt.figure(figsize=(8, 5))
         plt.plot(x.numpy(), cdf_vals.numpy())
         plt.xlabel("Value")
@@ -56,12 +58,14 @@ def test_cdf_random_logits(
         plt.title(f"CDF for random logits scaled by {logit_scale}")
         plt.legend()
         plt.grid(True, alpha=0.3)
+        class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
         plt.savefig(
-            f"tests/results/cdf_random_logits_scale-{logit_scale}_normalization-{bin_normalization_method}.png",
+            f"tests/results/cdf_random_logits_scale-{logit_scale}_normalization-{bin_normalization_method}_{class_suffix}.png",
             bbox_inches="tight",
         )
 
 
+@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("sample_batch_size", [None, 1, 8])
 @pytest.mark.parametrize("distr_batch_size", [1, 3])
 @pytest.mark.parametrize(
@@ -73,6 +77,7 @@ def test_cdf_random_logits(
     ],
 )
 def test_sampling_and_cdf_consistency(
+    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     sample_batch_size: int | None,  # number of samples to draw per distribution
     distr_batch_size: int,  # number of independent distributions to sample from
     use_cuda: bool,
@@ -89,9 +94,9 @@ def test_sampling_and_cdf_consistency(
 
     # Create random distribution and sample from it.
     logits = torch.randn(distr_batch_size, num_bins, device=device)
-    dist = PiecewiseConstantBinnedCDF(logits, bound_low, bound_up)
+    distr = distr_class(logits, bound_low, bound_up)
     sample_shape = (num_samples,) if sample_batch_size is None else (sample_batch_size, num_samples)
-    samples = dist.sample(sample_shape)
+    samples = distr.sample(sample_shape)
     assert samples.device == device
     assert samples.shape == (*sample_shape, distr_batch_size)
 
@@ -107,9 +112,9 @@ def test_sampling_and_cdf_consistency(
         batch_samples = samples.squeeze(-1) if distr_batch_size == 1 else samples[..., batch_idx]
 
         # Create a single-distribution version for easier CDF evaluation.
-        single_logits = dist.logits[batch_idx : batch_idx + 1]  # Keep batch dimension of size 1
-        single_dist = PiecewiseConstantBinnedCDF(single_logits, bound_low, bound_up)
-        theoretical_cdf = single_dist.cdf(test_points).squeeze(0)  # remove batch dimension
+        single_logits = distr.logits[batch_idx : batch_idx + 1]  # Keep batch dimension of size 1
+        single_distr = distr_class(single_logits, bound_low, bound_up)
+        theoretical_cdf = single_distr.cdf(test_points).squeeze(0)  # remove batch dimension
 
         # Store for plotting (use the first distribution).
         if batch_idx == 0 and distr_batch_size == 1:
@@ -139,9 +144,11 @@ def test_sampling_and_cdf_consistency(
         plt.title("Empirical vs Theoretical CDF")
         plt.legend()
         plt.grid(True, alpha=0.3)
-        plt.savefig("tests/results/sampling_and_cdf_consistency.png", bbox_inches="tight")
+        class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
+        plt.savefig(f"tests/results/sampling_and_cdf_consistency_{class_suffix}.png", bbox_inches="tight")
 
 
+@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("batch_size", [None, 1, 8, 16])
 @pytest.mark.parametrize(
     "use_cuda",
@@ -151,6 +158,7 @@ def test_sampling_and_cdf_consistency(
     ],
 )
 def test_icdf_random_quantiles(
+    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     batch_size: int | None,
     use_cuda: bool,
     bound_low: float = -10,
@@ -168,11 +176,11 @@ def test_icdf_random_quantiles(
     quantiles = torch.rand(num_quantiles, device=device)
 
     # Compute ICDF.
-    dist = PiecewiseConstantBinnedCDF(logits, bound_low, bound_up)
+    distr = distr_class(logits, bound_low, bound_up)
     if batch_size is not None:
         # For batched distributions, expand quantiles to (num_quantiles, *batch_shape)
         quantiles = quantiles.unsqueeze(-1).expand(num_quantiles, batch_size)
-    icdf_values = dist.icdf(quantiles)
+    icdf_values = distr.icdf(quantiles)
 
     # Check shape and device. Output shape should match input shape: (*sample_shape, *batch_shape)
     expected_shape = (num_quantiles,) if batch_size is None else (num_quantiles, batch_size)
@@ -184,12 +192,13 @@ def test_icdf_random_quantiles(
     assert torch.all(icdf_values <= bound_up), f"ICDF values above upper bound: max={icdf_values.max()}"
 
     # Check boundary quantiles.
-    icdf_at_0 = dist.icdf(torch.tensor(0.0, device=device))
-    icdf_at_1 = dist.icdf(torch.tensor(1.0, device=device))
+    icdf_at_0 = distr.icdf(torch.tensor(0.0, device=device))
+    icdf_at_1 = distr.icdf(torch.tensor(1.0, device=device))
     assert torch.all(icdf_at_0 >= bound_low - 1e-5), f"ICDF(0) should be >= bound_low: {icdf_at_0}"
     assert torch.all(icdf_at_1 <= bound_up + 1e-5), f"ICDF(1) should be <= bound_up: {icdf_at_1}"
 
 
+@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
 @pytest.mark.parametrize(
     "use_cuda,plot",
@@ -200,6 +209,7 @@ def test_icdf_random_quantiles(
     ],
 )
 def test_icdf_fixed_quantiles(
+    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     log_spacing: bool,
     use_cuda: bool,
     plot: bool,
@@ -213,26 +223,26 @@ def test_icdf_fixed_quantiles(
 
     # Create a distribution with random logits.
     logits = torch.randn(num_bins, device=device)
-    dist = PiecewiseConstantBinnedCDF(logits, bound_low, bound_up, log_spacing=log_spacing)
+    distr = distr_class(logits, bound_low, bound_up, log_spacing=log_spacing)
 
     # Test fixed quantiles with both linear and log spacing for the quantiles themselves.
     quantiles = torch.tensor([0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99], device=device)
 
     # Compute inverse CDF at these quantiles.
-    icdf_values = dist.icdf(quantiles)
+    icdf_values = distr.icdf(quantiles)
 
     # Verify that all icdf values are within bounds.
     assert torch.all(icdf_values >= bound_low), f"ICDF values below lower bound: min={icdf_values.min()}"
     assert torch.all(icdf_values <= bound_up), f"ICDF values above upper bound: max={icdf_values.max()}"
 
     # Test the round-trip property: cdf(icdf(q)) ≈ q.
-    cdf_roundtrip = dist.cdf(icdf_values)
-    if isinstance(dist, PiecewiseConstantBinnedCDF):
+    cdf_roundtrip = distr.cdf(icdf_values)
+    if isinstance(distr, PiecewiseConstantBinnedCDF):
         atol = 2 / num_bins
-    elif use_cuda:
-        atol = 8e-4
+    elif isinstance(distr, PiecewiseLinearBinnedCDF):
+        atol = 1e-6
     else:
-        atol = 4e-4
+        raise TypeError("Unknown distribution class for setting atol")
     torch.testing.assert_close(
         cdf_roundtrip,
         quantiles,
@@ -252,7 +262,7 @@ def test_icdf_fixed_quantiles(
         # Panel 1: ICDF function.
         ax1 = axes[0, 0]
         q_dense = torch.linspace(0, 1, 500)
-        icdf_dense = dist.icdf(q_dense)
+        icdf_dense = distr.icdf(q_dense)
         ax1.plot(q_dense.numpy(), icdf_dense.numpy(), linewidth=2, label="ICDF")
         ax1.scatter(quantiles.numpy(), icdf_values.numpy(), color="red", s=30, alpha=0.6, label="Test quantiles")
         ax1.set_xlabel("Quantile (q)")
@@ -264,7 +274,7 @@ def test_icdf_fixed_quantiles(
         # Panel 2: CDF for reference.
         ax2 = axes[0, 1]
         x_dense = torch.linspace(bound_low, bound_up, 500)
-        cdf_dense = dist.cdf(x_dense)
+        cdf_dense = distr.cdf(x_dense)
         ax2.plot(x_dense.numpy(), cdf_dense.numpy(), linewidth=2, label="CDF")
         ax2.scatter(icdf_values.numpy(), quantiles.numpy(), color="red", s=30, alpha=0.6, label="(icdf(q), q)")
         ax2.set_xlabel("Value")
@@ -292,9 +302,9 @@ def test_icdf_fixed_quantiles(
             f"Num bins: {num_bins}\n"
             f"Log spacing: {log_spacing}\n"
             f"Bounds: [{bound_low}, {bound_up}]\n"
-            f"Mean: {dist.mean.item():.3f}\n"
-            f"Std: {math.sqrt(dist.variance.item()):.3f}\n"
-            f"Entropy: {dist.entropy().item():.3f}\n\n"
+            f"Mean: {distr.mean.item():.3f}\n"
+            f"Std: {math.sqrt(distr.variance.item()):.3f}\n"
+            f"Entropy: {distr.entropy().item():.3f}\n\n"
             f"Test Results:\n"
             f"{'=' * 40}\n"
             f"Quantiles tested: {len(quantiles)}\n"
@@ -304,7 +314,10 @@ def test_icdf_fixed_quantiles(
         )
         ax4.text(0.1, 0.5, properties_text, fontsize=10, verticalalignment="center", family="monospace")
 
+        class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
         spacing_suffix = "log-spacing" if log_spacing else "linear-spacing"
         plt.suptitle(f"ICDF Test with Fixed Quantiles ({spacing_suffix})", fontsize=14)
         plt.tight_layout()
-        plt.savefig(f"tests/results/icdf_fixed_quantiles_{spacing_suffix}.png", bbox_inches="tight", dpi=100)
+        plt.savefig(
+            f"tests/results/icdf_fixed_quantiles_{class_suffix}_{spacing_suffix}.png", bbox_inches="tight", dpi=100
+        )

@@ -7,9 +7,10 @@ import seaborn as sns
 import torch
 from scipy import stats
 
-from binned_cdf import PiecewiseConstantBinnedCDF
+from binned_cdf import PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
 
 
+@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize(
     "target_dist_params",
     [
@@ -42,6 +43,7 @@ from binned_cdf import PiecewiseConstantBinnedCDF
     ],
 )
 def test_distribution_reconstruction(
+    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     target_dist_params: dict,
     log_spacing: bool,
     plot: bool,
@@ -56,7 +58,7 @@ def test_distribution_reconstruction(
     dist_params = target_dist_params["params"]
     bound_low, bound_up = target_dist_params["bounds"]
     tolerances = target_dist_params["tolerances"]
-    target_dist = dist_class(**dist_params)
+    target_distr = dist_class(**dist_params)
 
     # Skip log spacing tests for incompatible bounds.
     if log_spacing and not math.isclose(-bound_low, bound_up):
@@ -67,11 +69,11 @@ def test_distribution_reconstruction(
         pytest.skip("log_spacing requires even number of bins")
 
     # Get distribution properties for validation.
-    target_mean = target_dist.mean.item()
-    target_std = target_dist.stddev.item()
+    target_mean = target_distr.mean.item()
+    target_std = target_distr.stddev.item()
 
     # Use the PiecewiseConstantBinnedCDF's own bin construction to ensure matching shapes between distributions.
-    _, bin_centers, bin_widths = PiecewiseConstantBinnedCDF._create_bins(
+    _, bin_centers, bin_widths = distr_class._create_bins(
         num_bins=num_bins,
         bound_low=bound_low,
         bound_up=bound_up,
@@ -81,7 +83,7 @@ def test_distribution_reconstruction(
     )
 
     # Compute target probabilities at bin centers.
-    target_probs = torch.exp(target_dist.log_prob(bin_centers))
+    target_probs = torch.exp(target_distr.log_prob(bin_centers))
 
     # Normalize to get probability masses for each bin.
     target_prob_masses = target_probs * bin_widths
@@ -93,14 +95,9 @@ def test_distribution_reconstruction(
     logits = torch.log(target_prob_masses / (1 - target_prob_masses))
 
     # Create PiecewiseConstantBinnedCDF distribution, and get mean and variance.
-    dist = PiecewiseConstantBinnedCDF(
-        logits=logits,
-        bound_low=bound_low,
-        bound_up=bound_up,
-        log_spacing=log_spacing,
-    )
-    reconstructed_mean = dist.mean.item()
-    reconstructed_var = dist.variance.item()
+    distr = distr_class(logits=logits, bound_low=bound_low, bound_up=bound_up, log_spacing=log_spacing)
+    reconstructed_mean = distr.mean.item()
+    reconstructed_var = distr.variance.item()
     reconstructed_std = math.sqrt(reconstructed_var)
 
     # Check if mean and std are reasonably close (within specified tolerance).
@@ -121,8 +118,8 @@ def test_distribution_reconstruction(
 
     # Generate samples for statistical tests.
     n_samples = 10_000
-    original_samples = target_dist.sample((n_samples,))
-    reconstructed_samples = dist.sample((n_samples,)).squeeze()
+    original_samples = target_distr.sample((n_samples,))
+    reconstructed_samples = distr.sample((n_samples,)).squeeze()
 
     if plot:
         # Create comparison plot.
@@ -139,8 +136,8 @@ def test_distribution_reconstruction(
         # Plot CDFs.
         plt.subplot(1, 2, 2)
         x_range = torch.linspace(bound_low, bound_up, 1000)
-        original_cdf = target_dist.cdf(x_range)
-        reconstructed_cdf = dist.cdf(x_range)
+        original_cdf = target_distr.cdf(x_range)
+        reconstructed_cdf = distr.cdf(x_range)
         plt.plot(x_range.numpy(), original_cdf.numpy(), label="Original CDF", linewidth=2)
         plt.plot(x_range.numpy(), reconstructed_cdf.numpy(), label="Reconstructed CDF", linewidth=2, linestyle="--")
         plt.xlabel("Value")
@@ -152,7 +149,10 @@ def test_distribution_reconstruction(
         plt.tight_layout()
         dist_name = dist_class.__name__.lower()
         spacing_suffix = "log-init" if log_spacing else "linear-init"
-        plt.savefig(f"tests/results/{dist_name}_reconstruction_{spacing_suffix}.png", bbox_inches="tight")
+        class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
+        plt.savefig(
+            f"tests/results/reconstruction_{dist_name}_{spacing_suffix}_{class_suffix}.png", bbox_inches="tight"
+        )
 
     # Additional we run the Kolmogorov-Smirnov test which looks at the maximum difference between CDFs.
     ks_statistic, ks_p_value = stats.ks_2samp(original_samples.numpy(), reconstructed_samples.numpy())

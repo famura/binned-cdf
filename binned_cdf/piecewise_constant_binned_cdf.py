@@ -325,7 +325,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         else:
             log_bin_probs = log_softmax(self.logits, dim=-1)
 
-        log_probs = self._gather_from_bins(log_bin_probs, bin_indices, num_sample_dims, value_prep.shape)
+        log_probs = self._gather_from_bins(log_bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
 
         return log_probs
 
@@ -347,7 +347,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
-        probs = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, value_prep.shape)
+        probs = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
 
         return probs
 
@@ -375,7 +375,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         zero_prefix = torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device)
         cumsum_probs = torch.cat([zero_prefix, cumsum_probs], dim=-1)  # shape: (*batch_shape, num_bins + 1)
 
-        cdf_values = self._gather_from_bins(cumsum_probs, bin_indices, num_sample_dims, value_prep.shape)
+        cdf_values = self._gather_from_bins(cumsum_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
 
         return cdf_values
 
@@ -411,7 +411,9 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         bin_indices = self._get_bin_indices(value_prep.unsqueeze(-1), bin_edges=cdf_edges_expanded)
 
-        quantiles = self._gather_from_bins(self.bin_centers, bin_indices, num_sample_dims, value_prep.shape)
+        quantiles = self._gather_from_bins(
+            self.bin_centers, bin_indices, num_sample_dims, target_shape=value_prep.shape
+        )
 
         return quantiles  # shape: (*sample_shape, *batch_shape)
 

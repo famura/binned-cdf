@@ -5,10 +5,11 @@ import numpy as np
 import pytest
 import torch
 
-from binned_cdf import PiecewiseConstantBinnedCDF
+from binned_cdf import PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
 from tests.conftest import needs_cuda
 
 
+@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
 @pytest.mark.parametrize("num_bins", [1, 2, 7, 1000])  # 2 is an edge case for log-spacing
 @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
@@ -22,6 +23,7 @@ from tests.conftest import needs_cuda
     ],
 )
 def test_basic_properties(
+    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     batch_size: int | None,
     num_bins: int,
     log_spacing: bool,
@@ -30,77 +32,77 @@ def test_basic_properties(
     bound_up: int,
     use_cuda: bool,
 ):
-    """Test basic properties of the PiecewiseConstantBinnedCDF."""
+    """Test basic properties of the PiecewiseConstantBinnedCDF and PiecewiseLinearBinnedCDF."""
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
 
     if log_spacing and not math.isclose(-bound_low, bound_up):
         with pytest.raises(ValueError, match="log_spacing requires symmetric bounds"):
-            PiecewiseConstantBinnedCDF(
+            distr_class(
                 logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
             )
         return
     if log_spacing and bound_up <= 0:
         with pytest.raises(ValueError, match="log_spacing requires positive upper bound"):
-            PiecewiseConstantBinnedCDF(
+            distr_class(
                 logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
             )
         return
     if log_spacing and num_bins % 2 != 0:
         with pytest.raises(ValueError, match="log_spacing requires even number of bins"):
-            PiecewiseConstantBinnedCDF(
+            distr_class(
                 logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
             )
         return
-    dist = PiecewiseConstantBinnedCDF(
+    distr = distr_class(
         logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
     )
 
     # Test that tensors are on the correct device.
-    assert dist.logits.device == device
-    assert dist.bin_edges.device == device
-    assert dist.bin_centers.device == device
-    assert dist.bin_widths.device == device
+    assert distr.logits.device == device
+    assert distr.bin_edges.device == device
+    assert distr.bin_centers.device == device
+    assert distr.bin_widths.device == device
 
     # Test properties directly coming from the arguments.
-    assert dist.num_bins == num_bins
-    assert dist.bound_low == bound_low
-    assert dist.bound_up == bound_up
-    assert dist.support.lower_bound == bound_low
-    assert dist.support.upper_bound == bound_up
-    assert dist.arg_constraints == {}  # we never had any constraints
-    assert dist.batch_shape == torch.Size([]) if batch_size is None else torch.Size([batch_size])
-    assert dist.event_shape == torch.Size([])
+    assert distr.num_bins == num_bins
+    assert distr.bound_low == bound_low
+    assert distr.bound_up == bound_up
+    assert distr.support.lower_bound == bound_low
+    assert distr.support.upper_bound == bound_up
+    assert distr.arg_constraints == {}  # we never had any constraints
+    assert distr.batch_shape == torch.Size([]) if batch_size is None else torch.Size([batch_size])
+    assert distr.event_shape == torch.Size([])
 
     # Check bin shapes.
-    assert dist.bin_edges.shape == (num_bins + 1,) if batch_size is None else (batch_size, num_bins + 1)
-    assert dist.bin_centers.shape == (num_bins,) if batch_size is None else (batch_size, num_bins)
-    assert dist.bin_widths.shape == (num_bins,) if batch_size is None else (batch_size, num_bins)
-    assert dist.num_edges == dist.num_bins + 1
+    assert distr.bin_edges.shape == (num_bins + 1,) if batch_size is None else (batch_size, num_bins + 1)
+    assert distr.bin_centers.shape == (num_bins,) if batch_size is None else (batch_size, num_bins)
+    assert distr.bin_widths.shape == (num_bins,) if batch_size is None else (batch_size, num_bins)
+    assert distr.num_edges == distr.num_bins + 1
 
     # Test basic string representation.
-    repr_str = repr(dist)
-    assert "PiecewiseConstantBinnedCDF" in repr_str
+    repr_str = repr(distr)
+    assert distr_class.__name__ in repr_str
 
     # Test that probabilities are valid. They should be normalized, and sum to 1.
-    probs = dist.bin_probs
+    probs = distr.bin_probs
     assert probs.device == device
     assert torch.all(probs >= 0)
     assert torch.all(probs <= 1)
-    assert torch.allclose(probs.sum(dim=-1), torch.ones(dist.batch_shape, device=device))
+    assert torch.allclose(probs.sum(dim=-1), torch.ones(distr.batch_shape, device=device))
 
     # The probabilities should also be deterministic.
-    probs2 = dist.bin_probs
+    probs2 = distr.bin_probs
     assert torch.allclose(probs, probs2)
 
     # Test that mean and variance have the correct shape and are finite.
-    mean = dist.mean
-    var = dist.variance
+    mean = distr.mean
+    var = distr.variance
     assert mean.device == device
     assert var.device == device
-    assert mean.shape == dist.batch_shape
-    assert var.shape == dist.batch_shape
+    assert mean.shape == distr.batch_shape
+    assert var.shape == distr.batch_shape
     assert torch.all(torch.isfinite(mean))
     assert torch.all(var >= 0)
     assert torch.all(torch.isfinite(var))
@@ -135,12 +137,12 @@ def test_expand(
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
-    dist = PiecewiseConstantBinnedCDF(logits, log_spacing=log_spacing)
+    distr = PiecewiseConstantBinnedCDF(logits, log_spacing=log_spacing)
 
-    expanded_dist = dist.expand(new_batch_shape)
+    expanded_dist = distr.expand(new_batch_shape)
 
     # Assert that expanded_dist is a different object (not the same instance).
-    assert expanded_dist is not dist, "Expanded distribution should be a new instance"
+    assert expanded_dist is not distr, "Expanded distribution should be a new instance"
 
     # Assert that the expanded distribution is on the same device.
     assert expanded_dist.logits.device == device, f"Expected device {device}, got {expanded_dist.logits.device}"
@@ -162,11 +164,12 @@ def test_expand(
     # Verify properties that should remain unchanged.
     assert expanded_dist.event_shape == torch.Size([]), "event_shape should remain empty (scalar)"
     assert expanded_dist.num_bins == num_bins, "num_bins should be unchanged"
-    assert expanded_dist.bin_edges.shape == dist.bin_edges.shape, "bin_edges shape should be unchanged"
-    assert expanded_dist.bin_centers.shape == dist.bin_centers.shape, "bin_centers shape should be unchanged"
-    assert expanded_dist.bin_widths.shape == dist.bin_widths.shape, "bin_widths shape should be unchanged"
+    assert expanded_dist.bin_edges.shape == distr.bin_edges.shape, "bin_edges shape should be unchanged"
+    assert expanded_dist.bin_centers.shape == distr.bin_centers.shape, "bin_centers shape should be unchanged"
+    assert expanded_dist.bin_widths.shape == distr.bin_widths.shape, "bin_widths shape should be unchanged"
 
 
+@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
 @pytest.mark.parametrize("num_bins", [2, 200])  # 2 is an edge case for log-spacing
 @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
@@ -179,6 +182,7 @@ def test_expand(
     ],
 )
 def test_prob_random_logits(
+    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     batch_size: int | None,
     num_bins: int,
     log_spacing: bool,
@@ -191,9 +195,7 @@ def test_prob_random_logits(
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
-    dist = PiecewiseConstantBinnedCDF(
-        logits, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
-    )
+    dist = distr_class(logits, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method)
 
     # Define expected shapes based on batch_size. The bins go into the sample shape.
     bin_centers = dist.bin_centers
@@ -300,83 +302,83 @@ def test_shannon_entropy(
     )
 
 
-# @pytest.mark.parametrize(
-#     "target_dist_params",
-#     [
-#         pytest.param(
-#             {
-#                 "dist": torch.distributions.Normal,
-#                 "params": {"loc": 0.0, "scale": 1.0},
-#                 "bounds": (-5.0, 5.0),
-#                 "rel_tol": 0.05,
-#             },
-#             id="standard_normal",
-#         ),
-#         pytest.param(
-#             {
-#                 "dist": torch.distributions.Normal,
-#                 "params": {"loc": 0.0, "scale": 3.0},
-#                 "bounds": (-15.0, 15.0),
-#                 "rel_tol": 0.05,
-#             },
-#             id="extreme_normal",
-#         ),
-#     ],
-# )
-# @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
-# def test_differential_entropy(
-#     target_dist_params: dict,
-#     log_spacing: bool,
-#     num_bins: int = 200,
-# ):
-#     """Test differential entropy computation against theoretical values from known distributions."""
-#     torch.manual_seed(42)
-#     np.random.seed(42)
+@pytest.mark.parametrize(
+    "target_dist_params",
+    [
+        pytest.param(
+            {
+                "dist": torch.distributions.Normal,
+                "params": {"loc": 0.0, "scale": 1.0},
+                "bounds": (-5.0, 5.0),
+                "rel_tol": 0.05,
+            },
+            id="standard_normal",
+        ),
+        pytest.param(
+            {
+                "dist": torch.distributions.Normal,
+                "params": {"loc": 0.0, "scale": 3.0},
+                "bounds": (-15.0, 15.0),
+                "rel_tol": 0.05,
+            },
+            id="extreme_normal",
+        ),
+    ],
+)
+@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
+def test_differential_entropy(
+    target_dist_params: dict,
+    log_spacing: bool,
+    num_bins: int = 200,
+):
+    """Test differential entropy computation against theoretical values from known distributions."""
+    torch.manual_seed(42)
+    np.random.seed(42)
 
-#     # Extract parameters from the parametrized input.
-#     dist_class = target_dist_params["dist"]
-#     dist_params = target_dist_params["params"]
-#     bound_low, bound_up = target_dist_params["bounds"]
-#     rel_tol = target_dist_params["rel_tol"]
+    # Extract parameters from the parametrized input.
+    dist_class = target_dist_params["dist"]
+    dist_params = target_dist_params["params"]
+    bound_low, bound_up = target_dist_params["bounds"]
+    rel_tol = target_dist_params["rel_tol"]
 
-#     # Create target distribution, and get the entropy.
-#     target_dist = dist_class(**dist_params)
-#     target_entropy = target_dist.entropy().item()
+    # Create target distribution, and get the entropy.
+    target_dist = dist_class(**dist_params)
+    target_entropy = target_dist.entropy().item()
 
-#     # Use the PiecewiseConstantBinnedCDF's own bin construction to ensure matching shapes between distributions.
-#     _, bin_centers, bin_widths = PiecewiseConstantBinnedCDF._create_bins(
-#         num_bins=num_bins,
-#         bound_low=bound_low,
-#         bound_up=bound_up,
-#         log_spacing=log_spacing,
-#         device=torch.device("cpu"),
-#         dtype=torch.float32,
-#     )
+    # Use the PiecewiseLinearBinnedCDF's own bin construction to ensure matching shapes between distributions.
+    _, bin_centers, bin_widths = PiecewiseLinearBinnedCDF._create_bins(
+        num_bins=num_bins,
+        bound_low=bound_low,
+        bound_up=bound_up,
+        log_spacing=log_spacing,
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
 
-#     # Compute target probabilities at bin centers, and normalize to get probability masses for each bin.
-#     target_probs = torch.exp(target_dist.log_prob(bin_centers))
-#     target_prob_masses = target_probs * bin_widths
-#     target_prob_masses = target_prob_masses / target_prob_masses.sum()
+    # Compute target probabilities at bin centers, and normalize to get probability masses for each bin.
+    target_probs = torch.exp(target_dist.log_prob(bin_centers))
+    target_prob_masses = target_probs * bin_widths
+    target_prob_masses = target_prob_masses / target_prob_masses.sum()
 
-#     # Convert probabilities to logits (inverse sigmoid).
-#     eps = 1e-8
-#     target_prob_masses = torch.clamp(target_prob_masses, eps, 1 - eps)
-#     logits = torch.log(target_prob_masses / (1 - target_prob_masses))
+    # Convert probabilities to logits (inverse sigmoid).
+    eps = 1e-8
+    target_prob_masses = torch.clamp(target_prob_masses, eps, 1 - eps)
+    logits = torch.log(target_prob_masses / (1 - target_prob_masses))
 
-#     # Create PiecewiseConstantBinnedCDF distribution, and compute reconstructed entropy.
-#     dist = PiecewiseConstantBinnedCDF(
-#         logits=logits.unsqueeze(0),
-#         bound_low=bound_low,
-#         bound_up=bound_up,
-#         log_spacing=log_spacing,
-#     )
-#     reconstructed_entropy = dist.entropy().item()
+    # Create PiecewiseLinearBinnedCDF distribution, and compute reconstructed entropy.
+    dist = PiecewiseLinearBinnedCDF(
+        logits=logits.unsqueeze(0),
+        bound_low=bound_low,
+        bound_up=bound_up,
+        log_spacing=log_spacing,
+    )
+    reconstructed_entropy = dist.entropy().item()
 
-#     # Check that reconstructed entropy is close to theoretical value.
-#     torch.testing.assert_close(
-#         reconstructed_entropy,
-#         target_entropy,
-#         rtol=rel_tol,
-#         atol=1e-6,
-#         msg=f"Entropy mismatch: reconstructed={reconstructed_entropy:.6f}, theoretical={target_entropy:.6f}",
-#     )
+    # Check that reconstructed entropy is close to theoretical value.
+    torch.testing.assert_close(
+        reconstructed_entropy,
+        target_entropy,
+        rtol=rel_tol,
+        atol=1e-6,
+        msg=f"Entropy mismatch: reconstructed={reconstructed_entropy:.6f}, theoretical={target_entropy:.6f}",
+    )

@@ -6,8 +6,8 @@ from .piecewise_constant_binned_cdf import PiecewiseConstantBinnedCDF
 class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
     """A continuous probability distribution parameterized by binned logits for the CDF.
 
-    Unlike [PiecewiseConstantBinnedCDF][binned_cdf.piecewise_constant_cdf.PiecewiseConstantBinnedCDF], which evaluates the CDF as a
-    step function over bin centers, this class implements a true piecewise-linear CDF, i.e., histogram PDF,
+    Unlike [PiecewiseConstantBinnedCDF][binned_cdf.piecewise_constant_cdf.PiecewiseConstantBinnedCDF], which evaluates
+    the CDF as a step function over bin centers, this class implements a true piecewise-linear CDF, i.e., histogram PDF,
     interpolating smoothly between bin edges.
     """
 
@@ -35,16 +35,18 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
             Log PDF values corresponding to the input values.
             Output shape: same as `value` shape after broadcasting, i.e., (*sample_shape, *batch_shape).
         """
-        # Compute the log of the probability mass for the bin the value falls into.
-        log_mass = super().log_prob(value)
-
-        # We need to gather the width of the bin the value falls into
         value_prep, num_sample_dims = self._prepare_input(value)
+
+        # Compute the log of the probability mass for the bin the value falls into.
+        log_mass = super().log_prob(value)  # also validates the args if self._validate_args is True
+
+        # We need to gather the width of the bin the value falls into.
         bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
-        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, value_prep.shape)
+        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, target_shape=value_prep.shape)
 
         # Log density = log(mass / width) = log_mass - log_width.
-        log_prob = log_mass - torch.log(widths + 2 * widths.dtype.eps)
+        eps = torch.finfo(widths.dtype).eps
+        log_prob = log_mass - torch.log(widths + 2 * eps)
 
         return log_prob
 
@@ -67,11 +69,12 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
         bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
         # Gather normalized mass and bin width.
-        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, value_prep.shape)
-        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, value_prep.shape)
+        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, target_shape=value_prep.shape)
 
         # Density = p(bin_i) / width_i.
-        prob = masses / (widths + 2 * widths.dtype.eps)
+        eps = torch.finfo(widths.dtype).eps
+        prob = masses / (widths + 2 * eps)
 
         return prob
 
@@ -95,20 +98,25 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
         bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
         # Gather the interpolation parameters.
-        left_edges = self._gather_from_bins(self.bin_edges[:-1], bin_indices, num_sample_dims, value_prep.shape)
-        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, value_prep.shape)
-        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, value_prep.shape)
+        left_edges = self._gather_from_bins(
+            self.bin_edges[:-1], bin_indices, num_sample_dims, target_shape=value_prep.shape
+        )
+        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
 
         # Get base CDF at the left edge of the bin.
+        # Prepend 0 for the case where no bins are active.
         cumsum_probs = torch.cumsum(self.bin_probs, dim=-1)
         zero_prefix = torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device)
-        base_cdf_table = torch.cat([zero_prefix, cumsum_probs], dim=-1)
-        base_cdf = self._gather_from_bins(base_cdf_table, bin_indices, num_sample_dims, value_prep.shape)
+        cumsum_probs = torch.cat([zero_prefix, cumsum_probs], dim=-1)  # shape: (*batch_shape, num_bins + 1)
+        base_cdf = self._gather_from_bins(cumsum_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
 
-        # Interpolate: cdf = base_cdf + (value - left_edge) * (mass / width)
-        alpha = (value_prep - left_edges) / (widths + 2 * widths.dtype.eps)
+        # Interpolate: cdf = base_cdf + (x_input - x_left_edge) * (mass / width)
+        eps = torch.finfo(widths.dtype).eps
+        alpha = (value_prep - left_edges) / (widths + 2 * eps)
         alpha = torch.clamp(alpha, 0.0, 1.0)  # prevent extrapolation
         cdf_vals = base_cdf + alpha * masses
+
         return cdf_vals
 
     def icdf(self, value: torch.Tensor) -> torch.Tensor:
@@ -123,7 +131,7 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
             Output shape: same as `value` shape after broadcasting, i.e., (*sample_shape, *batch_shape).
         """
         if self._validate_args:
-            raise ValueError("icdf input must be in [0, 1]")
+            self._validate_sample(value)
 
         value_prep, num_sample_dims = self._prepare_input(value)
 
@@ -138,16 +146,18 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
         bin_indices = self._get_bin_indices(value_prep.unsqueeze(-1), bin_edges=cdf_edges_aligned)
 
         # Gather the probability base.
-        base_cdf = self._gather_from_bins(cdf_edges, bin_indices, num_sample_dims, value_prep.shape)
+        base_cdf = self._gather_from_bins(cdf_edges, bin_indices, num_sample_dims, target_shape=value_prep.shape)
 
         # Gather the interpolation parameters.
-        left_edges = self._gather_from_bins(self.bin_edges[:-1], bin_indices, num_sample_dims, value_prep.shape)
-        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, value_prep.shape)
-        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, value_prep.shape)
+        left_edges = self._gather_from_bins(
+            self.bin_edges[:-1], bin_indices, num_sample_dims, target_shape=value_prep.shape
+        )
+        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
 
-        # Interpolate: x = x0 + (target_y - y0) * (width / mass)
-        # Handle division by zero for bins with no mass
-        slope = widths / (masses + 2 * masses.dtype.eps)
+        # Interpolate: x = x_left_edge + (target_cdf - base_cdf) * (width / mass)
+        eps = torch.finfo(masses.dtype).eps
+        slope = widths / (masses + 2 * eps)  # add eps to avoid division by zero for bins with no mass
         interp_value = left_edges + (value_prep - base_cdf) * slope
 
         quantiles = torch.clamp(interp_value, self.bound_low, self.bound_up)
