@@ -465,5 +465,6 @@ class PiecewiseConstantBinnedCDF(Distribution):
         """String representation of the distribution."""
         return (
             f"{self.__class__.__name__}(logits_shape: {self.logits.shape}, bound_low: {self.bound_low}, "
-            f"bound_up: {self.bound_up}, log_spacing: {self.log_spacing})"
+            f"bound_up: {self.bound_up}, log_spacing: {self.log_spacing}, "
+            f"normalization_method: {self.normalization_method})"
         )

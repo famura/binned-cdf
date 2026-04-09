@@ -7,14 +7,18 @@ from torch.distributions import Distribution, constraints
 _size = torch.Size()
 
 
-class BernsteinDistribution(Distribution):
-    """A continuous probability distribution parameterized by Bernstein polynomials.
+class BezierCDF(Distribution):
+    """A continuous probability distribution parameterized by Bernstein polynomials with custom constraints.
 
     The idea is that the CDF is represented as a Bezier curve, which is a weighted sum of Bernstein basis polynomials,
     defined by control points (betas) that are derived from the input logits.
     This allows for a smooth, flexible CDF that can capture complex shapes while still being differentiable.
     In fact, this formulation is mathematically equivalent to a mixture of Beta distributions, where the mixture
     weights are given by the deltas (softmax of the logits) and the Beta components are defined by the control points.
+
+    Since we know that any CDF must start at 0 and end at 1, we can enforce these constraints by fixing the first
+    control point to 0 and the last control point to 1. Moreover, we know that the 1st derivative of the CDF at the
+    boundaries must be 0, which means the 2nd must also be 0 and the 2nd-to-last control point must also be 1.
 
     The spacing of the control points along the domain-axis ("x-axis") is strictly uniform and determined by the
     degree of the Bernstein polynomial, hence, number of input logits.
@@ -48,16 +52,7 @@ class BernsteinDistribution(Distribution):
         self.normalization_method = normalization_method
 
         # Precompute binomial coefficients, and store them on the same device as logits.
-        # comb(n, k) = n! / (k! * (n-k)!) is the binomial coefficient, which counts the number of ways to choose k
-        # elements from a set of n elements.
-        self._cdf_combs = torch.tensor(
-            [math.comb(self.degree, i) for i in range(self.degree + 1)], device=logits.device, dtype=logits.dtype
-        )
-        self._pdf_combs = torch.tensor(
-            [math.comb(self.degree - 1, i) for i in range(self.degree)],
-            device=logits.device,
-            dtype=logits.dtype,
-        )
+        self._cdf_combs, self._pdf_combs = self._compute_binomial_coefficients()
 
         # Calculate parameters (deltas and betas).
         self.deltas, self.betas = self._compute_coefficients()
@@ -65,13 +60,43 @@ class BernsteinDistribution(Distribution):
         # Determine batch shape based on the logits. The event shape is scalar since this is a univariate distribution.
         super().__init__(batch_shape=logits.shape[:-1], event_shape=torch.Size([]), validate_args=validate_args)
 
-    @property
-    def degree(self) -> int:
-        """Get the degree of the Bernstein polynomial based on the number of logits.
+    def __repr__(self) -> str:
+        """String representation of the distribution."""
+        return (
+            f"{self.__class__.__name__}(logits_shape: {self.logits.shape}, bound_low: {self.bound_low}, "
+            f"bound_up: {self.bound_up}, normalization_method: {self.normalization_method})"
+        )
 
-        For a Bernstein polynomial of degree n, there are n + 1 control points (betas) and n deltas (weights).
+    def _compute_binomial_coefficients(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Compute the binomial coefficients for the CDF and PDF based on the degree of the Bernstein polynomial.
+
+        comb(n, k) = n! / (k! * (n-k)!) is the binomial coefficient, which counts the number of ways to choose k
+        elements from a set of n elements.
+
+        Returns:
+            cdf_combs: Binomial coefficients for the CDF, of shape (degree + 1,)
+            pdf_combs: Binomial coefficients for the PDF, of shape (degree,)
         """
-        return self.logits.shape[-1] + 2
+        cdf_combs = torch.tensor(
+            [math.comb(self.degree, i) for i in range(self.degree + 1)],
+            device=self.logits.device,
+            dtype=self.logits.dtype,
+        )
+
+        pdf_combs = torch.tensor(
+            [math.comb(self.degree - 1, i) for i in range(self.degree)],
+            device=self.logits.device,
+            dtype=self.logits.dtype,
+        )
+
+        # Check if any of the binomial coefficients became infinite.
+        if torch.isinf(cdf_combs).any() or torch.isinf(pdf_combs).any():
+            raise ValueError(
+                f"Binomial coefficients became infinite for degree {self.degree}. "
+                "Consider reducing the (last) dimension of the logits, leading to lower degree polynomial."
+            )
+
+        return cdf_combs, pdf_combs
 
     def _compute_coefficients(self) -> tuple[torch.Tensor, torch.Tensor]:
         r"""Compute the deltas (Beta mixture component weights) and betas (control points) for the Bezier curve based
@@ -101,15 +126,33 @@ class BernsteinDistribution(Distribution):
             raise ValueError(f"Unknown normalization method: {self.normalization_method}")
 
         # Pad the deltas with 0 for the flat start and flat end constraints.
+        # deltas = [0, delta_0, ..., delta_{n-1}, 0]
         zeros = torch.zeros(*steps.shape[:-1], 1, device=steps.device, dtype=steps.dtype)  # shape: (*batch_shape, 1)
         deltas = torch.cat([zeros, steps, zeros], dim=-1)  # shape: (*batch_shape, dim_logits + 2)
 
         # Pad the betas with 0 and 1 for the flat start and flat end constraints.
+        # betas = [0, 0, beta_0, ..., beta_{n-1}, 1, 1]
         inner_betas = torch.cumsum(steps, dim=-1)[..., :-1]
         ones = torch.ones(*steps.shape[:-1], 2, device=steps.device, dtype=steps.dtype)
         betas = torch.cat([zeros, zeros, inner_betas, ones], dim=-1)
 
         return deltas, betas
+
+    def _map_to_t_space(self, value: torch.Tensor) -> torch.Tensor:
+        r"""Map values from the original $X$ space to the $T$ space $[0, 1]$ using the bounds."""
+        return torch.clamp((value - self.bound_low) / self.support_range, 0, 1)
+
+    def _map_to_x_space(self, t: torch.Tensor) -> torch.Tensor:
+        r"""Map values from the $T$ space $[0, 1]$ back to the original $X$ space using the bounds."""
+        return t * self.support_range + self.bound_low
+
+    @property
+    def degree(self) -> int:
+        """Get the degree of the Bernstein polynomial based on the number of logits.
+
+        For a Bernstein polynomial of degree n, there are n + 1 control points (betas) and n deltas (weights).
+        """
+        return self.logits.shape[-1] + 2
 
     @property
     def mean(self) -> torch.Tensor:
@@ -135,8 +178,7 @@ class BernsteinDistribution(Distribution):
         """
         i_vals = torch.arange(self.degree, device=self.deltas.device, dtype=self.deltas.dtype)  # shape: (degree,)
         e_t = torch.sum(self.deltas * (i_vals + 1) / (self.degree + 1), dim=-1)
-
-        return (self.bound_up - self.bound_low) * e_t + self.bound_low
+        return self._map_to_x_space(e_t)
 
     @property
     def variance(self) -> torch.Tensor:
@@ -167,7 +209,7 @@ class BernsteinDistribution(Distribution):
         e_t2 = torch.sum(self.deltas * ((i_vals + 1) * (i_vals + 2)) / ((self.degree + 1) * (self.degree + 2)), dim=-1)
         var_t = e_t2 - e_t**2
 
-        return ((self.bound_up - self.bound_low) ** 2) * var_t
+        return self.support_range**2 * var_t
 
     @property
     def support(self) -> constraints.Constraint:
@@ -182,7 +224,7 @@ class BernsteinDistribution(Distribution):
     @property
     def arg_constraints(self) -> dict[str, constraints.Constraint]:
         """Constraints that should be satisfied by each argument of this distribution. None for this class."""
-        return {"logits": constraints.real, "bound_low": constraints.real, "bound_up": constraints.real}
+        return {"logits": constraints.real}
 
     def cdf(self, value: torch.Tensor) -> torch.Tensor:
         """Compute cumulative distribution function at given values.
@@ -194,7 +236,7 @@ class BernsteinDistribution(Distribution):
             CDF values in [0, 1] corresponding to the input values. Output shape: same as `value` argument.
         """
         # Map X in [bound_low, bound_up] to T in [0, 1].
-        t = torch.clamp((value - self.bound_low) / self.support_range, 0.0, 1.0)
+        t = self._map_to_t_space(value)
 
         # Evaluate Bezier curve defined in the T space.
         val = torch.zeros_like(t)
@@ -214,7 +256,7 @@ class BernsteinDistribution(Distribution):
             Log-PDF values corresponding to the input values. Output shape: same as `value` argument.
         """
         # Map X in [bound_low, bound_up] to T in [0, 1].
-        t = torch.clamp((value - self.bound_low) / self.support_range, 0.0, 1.0)
+        t = self._map_to_t_space(value)
 
         val = torch.zeros_like(t)
         for i in range(self.degree):

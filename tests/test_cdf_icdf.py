@@ -6,7 +6,7 @@ import pytest
 import seaborn as sns
 import torch
 
-from binned_cdf import PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
+from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
 from tests.conftest import needs_cuda
 
 
@@ -23,7 +23,7 @@ from tests.conftest import needs_cuda
     ],
 )
 def test_cdf_random_logits(
-    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
+    distr_class: type[BezierCDF] | type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     logit_scale: float,
     batch_size: int | None,
     normalization_method: Literal["sigmoid", "softmax"],
@@ -77,7 +77,7 @@ def test_cdf_random_logits(
     ],
 )
 def test_sampling_and_cdf_consistency(
-    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
+    distr_class: type[BezierCDF] | type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     sample_batch_size: int | None,  # number of samples to draw per distribution
     distr_batch_size: int,  # number of independent distributions to sample from
     use_cuda: bool,
@@ -158,7 +158,7 @@ def test_sampling_and_cdf_consistency(
     ],
 )
 def test_icdf_random_quantiles(
-    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
+    distr_class: type[BezierCDF] | type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     batch_size: int | None,
     use_cuda: bool,
     bound_low: float = -10,
@@ -209,7 +209,7 @@ def test_icdf_random_quantiles(
     ],
 )
 def test_icdf_fixed_quantiles(
-    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
+    distr_class: type[BezierCDF] | type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     log_spacing: bool,
     use_cuda: bool,
     plot: bool,

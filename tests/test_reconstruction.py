@@ -7,10 +7,10 @@ import seaborn as sns
 import torch
 from scipy import stats
 
-from binned_cdf import PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
+from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize(
     "target_dist_params",
     [
@@ -43,7 +43,7 @@ from binned_cdf import PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
     ],
 )
 def test_distribution_reconstruction(
-    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
+    distr_class: type[BezierCDF] | type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     target_dist_params: dict,
     log_spacing: bool,
     plot: bool,
