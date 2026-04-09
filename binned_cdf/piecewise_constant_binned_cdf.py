@@ -26,24 +26,24 @@ class PiecewiseConstantBinnedCDF(Distribution):
         bound_low: float = -1e3,
         bound_up: float = 1e3,
         log_spacing: bool = False,
-        bin_normalization_method: Literal["sigmoid", "softmax"] = "sigmoid",
+        normalization_method: Literal["sigmoid", "softmax"] = "sigmoid",
         validate_args: bool | None = None,
     ) -> None:
         """Initializer.
 
         Args:
-            logits: Raw logits for bin probabilities (before sigmoid), of shape (*batch_shape, num_bins)
+            logits: Raw logits for the bin probabilities (before sigmoid), of shape (*batch_shape, num_bins)
             bound_low: Lower bound of the distribution support, needs to be finite.
             bound_up: Upper bound of the distribution support, needs to be finite.
             log_spacing: Whether logarithmic (base = 2) spacing for the bins or linear spacing should be used.
-            bin_normalization_method: How to normalize bin probabilities. Either "sigmoid" or "softmax". With "sigmoid",
+            normalization_method: How to normalize the probabilities. Either "sigmoid" or "softmax". With "sigmoid",
                 each bin is independently activated, while with "softmax", the bins activations influence each other.
             validate_args: Whether to validate arguments. Carried over to keep the interface with the base class.
         """
         self.logits = logits
         self.bound_low = bound_low
         self.bound_up = bound_up
-        self.bin_normalization_method = bin_normalization_method
+        self.normalization_method = normalization_method
         self.log_spacing = log_spacing
 
         # Create bin structure (same for all batch dimensions).
@@ -56,6 +56,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
             dtype=logits.dtype,
         )
 
+        # Determine batch shape based on the logits. The event shape is scalar since this is a univariate distribution.
         super().__init__(batch_shape=logits.shape[:-1], event_shape=torch.Size([]), validate_args=validate_args)
 
     @classmethod
@@ -71,6 +72,13 @@ class PiecewiseConstantBinnedCDF(Distribution):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Create bin edges with symmetric log spacing around zero.
 
+        Layout:
+            - 1 edge at 0
+            - num_bins//2 - 1 edges from 0 to bound_up (log spaced)
+            - num_bins//2 - 1 edges from 0 to -bound_low (log spaced, mirrored)
+            - 2 boundary edges at ±bounds
+            - in total: num_bins + 1 edges creating num_bins bins
+
         Args:
             num_bins: Number of bins to create.
             bound_low: Lower bound of the distribution support.
@@ -83,14 +91,6 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         Returns:
             Tuple of (bin_edges, bin_centers, bin_widths).
-
-        Layout:
-            - 1 edge at 0
-            - num_bins//2 - 1 edges from 0 to bound_up (log spaced)
-            - num_bins//2 - 1 edges from 0 to -bound_low (log spaced, mirrored)
-            - 2 boundary edges at ±bounds
-
-        Total: num_bins + 1 edges creating num_bins bins
         """
         if log_spacing:
             if not math.isclose(-bound_low, bound_up):
@@ -149,7 +149,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
     @property
     def bin_probs(self) -> torch.Tensor:
         """Get normalized probabilities for each bin, of shape (*batch_shape, num_bins)."""
-        if self.bin_normalization_method == "sigmoid":
+        if self.normalization_method == "sigmoid":
             raw_probs = torch.sigmoid(self.logits)  # shape: (*batch_shape, num_bins)
             bin_probs = raw_probs / raw_probs.sum(dim=-1, keepdim=True)
         else:
@@ -158,23 +158,31 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
     @property
     def mean(self) -> torch.Tensor:
-        """Compute mean of the distribution, i.e., the weighted average of bin centers, of shape (*batch_shape,)."""
+        """Compute mean of the distribution, i.e., the weighted average of bin centers.
+
+        Returns:
+            Tensor of shape (*batch_shape,).
+        """
         weighted_centers = self.bin_probs * self.bin_centers  # shape: (*batch_shape, num_bins)
         return torch.sum(weighted_centers, dim=-1)
 
     @property
     def variance(self) -> torch.Tensor:
-        """Compute variance of the distribution, of shape (*batch_shape,)."""
+        """Compute variance of the distribution.
+
+        Returns:
+            Tensor of shape (*batch_shape,).
+        """
         # E[X^2] = weighted squared bin centers.
         weighted_centers_sq = self.bin_probs * (self.bin_centers**2)  # shape: (*batch_shape, num_bins)
         second_moment = torch.sum(weighted_centers_sq, dim=-1)  # shape: (*batch_shape,)
 
-        # Var = E[X^2] - E[X]^2
+        # Var = E[X^2] - E[X]^2.
         return second_moment - self.mean**2
 
     @property
     def support(self) -> constraints.Constraint:
-        """Support of this distribution. Needs to be limitited to keep the number of bins manageable."""
+        """Support of this distribution. The resolution also depends on the number of bins."""
         return constraints.interval(self.bound_low, self.bound_up)
 
     @property
@@ -249,7 +257,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         # Use binary search to find which bin each value belongs to. The torch.searchsorted function returns the
         # index where value would be inserted to maintain sorted order.
         if bin_edges is not None:
-            # Since bins are defined as [edge[i], edge[i+1]), we subtract 1 to get the bin index.
+            # Since bins are defined as [edge[i], edge[i + 1]), we subtract 1 to get the bin index.
             bin_indices = torch.searchsorted(bin_edges, value, right=True) - 1
         elif bin_centers is not None:
             # If value < first center, returns 0 -> gets 0.0 from cumsum_probs
@@ -302,11 +310,11 @@ class PiecewiseConstantBinnedCDF(Distribution):
         """Compute the log-probability density at given values.
 
         Args:
-            value: Values at which to compute the log PDF.
+            value: Values at which to compute the log-PDF.
                 Expected shape: (*sample_shape, *batch_shape) or broadcastable to it.
 
         Returns:
-            Log PDF values corresponding to the input values.
+            Log-PDF values corresponding to the input values.
             Output shape: same as `value` shape after broadcasting, i.e., (*sample_shape, *batch_shape).
         """
         if self._validate_args:
@@ -317,7 +325,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
         # Calculate the log-probabilities directly for stability.
-        if self.bin_normalization_method == "sigmoid":
+        if self.normalization_method == "sigmoid":
             # Normalized logsigmoid: log(sigmoid(x) / sum(sigmoid(x)))
             log_raw = logsigmoid(self.logits)
             log_normalization = torch.logsumexp(log_raw, dim=-1, keepdim=True)
@@ -439,8 +447,11 @@ class PiecewiseConstantBinnedCDF(Distribution):
     def entropy(self) -> torch.Tensor:
         r"""Compute Shannon entropy of the discrete distribution.
 
-        $$H(X) = -\sum_{i=1}^{n} p_i \log p_i$$
+        $$H[X] = -\sum_{i=1}^{n} p_i \log p_i$$
         where $p_i$ is the probability mass of bin $i$.
+
+        Returns:
+            Tensor of shape (*batch_shape,).
         """
         bin_probs = self.bin_probs
 

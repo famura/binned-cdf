@@ -12,7 +12,7 @@ from tests.conftest import needs_cuda
 
 @pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("logit_scale", [1e-3, 1, 1e3, 1e9])
-@pytest.mark.parametrize("bin_normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
 @pytest.mark.parametrize(
     "use_cuda,plot",
@@ -26,7 +26,7 @@ def test_cdf_random_logits(
     distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     logit_scale: float,
     batch_size: int | None,
-    bin_normalization_method: Literal["sigmoid", "softmax"],
+    normalization_method: Literal["sigmoid", "softmax"],
     use_cuda: bool,
     plot: bool,
     bound_low: float = -10,
@@ -38,7 +38,7 @@ def test_cdf_random_logits(
     logits = logit_scale * torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
 
-    distr = distr_class(logits, bound_low, bound_up, bin_normalization_method=bin_normalization_method)
+    distr = distr_class(logits, bound_low, bound_up, normalization_method=normalization_method)
 
     # Evaluate the CDF at the bounds.
     cdf_low = distr.cdf(torch.tensor(bound_low))
@@ -60,7 +60,7 @@ def test_cdf_random_logits(
         plt.grid(True, alpha=0.3)
         class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
         plt.savefig(
-            f"tests/results/cdf_random_logits_scale-{logit_scale}_normalization-{bin_normalization_method}_{class_suffix}.png",
+            f"tests/results/cdf_random_logits_scale-{logit_scale}_normalization-{normalization_method}_{class_suffix}.png",
             bbox_inches="tight",
         )
 

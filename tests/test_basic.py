@@ -14,7 +14,7 @@ from tests.conftest import needs_cuda
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
 @pytest.mark.parametrize("num_bins", [1, 2, 7, 1000])  # 2 is an edge case for log-spacing
 @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
-@pytest.mark.parametrize("bin_normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize("bound_low,bound_up", [(-5, 5), (0, 5), (-5, 0)])
 @pytest.mark.parametrize(
     "use_cuda",
@@ -28,7 +28,7 @@ def test_basic_properties(
     batch_size: int | None,
     num_bins: int,
     log_spacing: bool,
-    bin_normalization_method: Literal["sigmoid", "softmax"],
+    normalization_method: Literal["sigmoid", "softmax"],
     bound_low: int,
     bound_up: int,
     use_cuda: bool,
@@ -40,25 +40,17 @@ def test_basic_properties(
 
     if log_spacing and not math.isclose(-bound_low, bound_up):
         with pytest.raises(ValueError, match="log_spacing requires symmetric bounds"):
-            distr_class(
-                logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
-            )
+            distr_class(logits, bound_low, bound_up, log_spacing=log_spacing, normalization_method=normalization_method)
         return
     if log_spacing and bound_up <= 0:
         with pytest.raises(ValueError, match="log_spacing requires positive upper bound"):
-            distr_class(
-                logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
-            )
+            distr_class(logits, bound_low, bound_up, log_spacing=log_spacing, normalization_method=normalization_method)
         return
     if log_spacing and num_bins % 2 != 0:
         with pytest.raises(ValueError, match="log_spacing requires even number of bins"):
-            distr_class(
-                logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
-            )
+            distr_class(logits, bound_low, bound_up, log_spacing=log_spacing, normalization_method=normalization_method)
         return
-    distr = distr_class(
-        logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
-    )
+    distr = distr_class(logits, bound_low, bound_up, log_spacing=log_spacing, normalization_method=normalization_method)
 
     # Test that tensors are on the correct device.
     assert distr.logits.device == device
@@ -174,7 +166,7 @@ def test_expand(
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
 @pytest.mark.parametrize("num_bins", [2, 200])  # 2 is an edge case for log-spacing
 @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
-@pytest.mark.parametrize("bin_normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize(
     "use_cuda",
     [
@@ -187,7 +179,7 @@ def test_prob_random_logits(
     batch_size: int | None,
     num_bins: int,
     log_spacing: bool,
-    bin_normalization_method: Literal["sigmoid", "softmax"],
+    normalization_method: Literal["sigmoid", "softmax"],
     use_cuda: bool,
 ):
     """Test probability evaluation with random logits at the bounds."""
@@ -196,7 +188,7 @@ def test_prob_random_logits(
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
-    distr = distr_class(logits, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method)
+    distr = distr_class(logits, log_spacing=log_spacing, normalization_method=normalization_method)
 
     # Define expected shapes based on batch_size. The bins go into the sample shape.
     bin_centers = distr.bin_centers
@@ -228,7 +220,7 @@ def test_prob_random_logits(
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
 @pytest.mark.parametrize("num_bins", [2, 200])  # 2 is an edge case for log-spacing
 @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
-@pytest.mark.parametrize("bin_normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize(
     "use_cuda",
     [
@@ -241,7 +233,7 @@ def test_prob(
     batch_size: int | None,
     num_bins: int,
     log_spacing: bool,
-    bin_normalization_method: Literal["sigmoid", "softmax"],
+    normalization_method: Literal["sigmoid", "softmax"],
     use_cuda: bool,
 ):
     """Test prob() returns valid densities and is consistent with log_prob()."""
@@ -250,7 +242,7 @@ def test_prob(
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
-    distr = distr_class(logits, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method)
+    distr = distr_class(logits, log_spacing=log_spacing, normalization_method=normalization_method)
 
     # Evaluate at bin centers.
     bin_centers = distr.bin_centers

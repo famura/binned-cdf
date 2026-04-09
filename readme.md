@@ -56,7 +56,7 @@ distr = PiecewiseLinearBinnedCDF(
     bound_low=-5,  # adapt to your data
     bound_up=7,  # adapt to your data
     log_spacing=True,  # if False, linear spacing is used
-    bin_normalization_method="sigmoid",  # "sigmoid" or "softmax"
+    normalization_method="sigmoid",  # "sigmoid" or "softmax"
 )
 
 # ... use it like any other torch.distribution.Distribution
