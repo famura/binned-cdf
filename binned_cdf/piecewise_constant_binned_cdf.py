@@ -220,7 +220,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
                 value = value.unsqueeze(-1)
 
         num_sample_dims = max(0, value.ndim - len(self.batch_shape))
-        target_shape = torch.Size(value.shape[:num_sample_dims]) + self.batch_shape
+        target_shape = self._extended_shape(sample_shape=value.shape[:num_sample_dims])
         value = value.expand(target_shape)
         value = value.contiguous()  # for searchsorted later
 
