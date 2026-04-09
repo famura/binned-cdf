@@ -180,7 +180,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
     @property
     def arg_constraints(self) -> dict[str, constraints.Constraint]:
         """Constraints that should be satisfied by each argument of this distribution. None for this class."""
-        return {}
+        return {"logits": constraints.real}
 
     def expand(
         self, batch_shape: torch.Size | list[int] | tuple[int, ...], _instance: Distribution | None = None
@@ -427,9 +427,14 @@ class PiecewiseConstantBinnedCDF(Distribution):
         Returns:
             Samples of shape (sample_shape + batch_shape), where batch_shape is the batch shape of the distribution.
         """
-        shape = torch.Size(sample_shape) + self.batch_shape
+        # Determine the final shape of the output tensor.
+        shape = self._extended_shape(sample_shape)
+
+        # Sample in [0, 1] and transform through inverse CDF to get samples in [bound_low, bound_up].
         uniform_samples = torch.rand(shape, dtype=self.logits.dtype, device=self.logits.device)
-        return self.icdf(uniform_samples)
+        samples = self.icdf(uniform_samples)
+
+        return samples
 
     def entropy(self) -> torch.Tensor:
         r"""Compute Shannon entropy of the discrete distribution.

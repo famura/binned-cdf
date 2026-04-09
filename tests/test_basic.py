@@ -4,6 +4,7 @@ from typing import Literal
 import numpy as np
 import pytest
 import torch
+from torch.distributions import constraints
 
 from binned_cdf import PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
 from tests.conftest import needs_cuda
@@ -71,7 +72,7 @@ def test_basic_properties(
     assert distr.bound_up == bound_up
     assert distr.support.lower_bound == bound_low
     assert distr.support.upper_bound == bound_up
-    assert distr.arg_constraints == {}  # we never had any constraints
+    assert distr.arg_constraints == {"logits": constraints.real}
     assert distr.batch_shape == torch.Size([]) if batch_size is None else torch.Size([batch_size])
     assert distr.event_shape == torch.Size([])
 
