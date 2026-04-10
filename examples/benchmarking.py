@@ -93,6 +93,7 @@ def benchmark_class(
         return {
             "__init__": measure_performance(distr_class, logits, num_iter_measure=num_iter),
             "prob": measure_performance(distr.prob, y, num_iter_measure=num_iter),
+            "log_prob": measure_performance(distr.log_prob, y, num_iter_measure=num_iter),
             "cdf": measure_performance(distr.cdf, y, num_iter_measure=num_iter),
             "icdf": measure_performance(distr.icdf, quantiles, num_iter_measure=num_iter),
             "sample": measure_performance(distr.sample, num_iter_measure=num_iter),

@@ -59,7 +59,7 @@ if __name__ == "__main__":
     """Main function to execute the density estimation example."""
     # Configure.
     distr_class: NewDistributionType = BezierCDF
-    num_bins = 20 if distr_class == BezierCDF else 100
+    num_bins = 50 if distr_class == BezierCDF else 100
     normalization_method: Literal["softmax", "sigmoid"] = "softmax" if distr_class == BezierCDF else "sigmoid"
 
     # Create ground truth data.
