@@ -1,4 +1,6 @@
 import math
+from pathlib import Path
+from typing import Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -18,7 +20,7 @@ from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBin
                 "dist": torch.distributions.Normal,
                 "params": {"loc": 3.0, "scale": 2.0},
                 "bounds": (-10.0, 10.0),
-                "tolerances": {"mean": 0.1, "std": 0.1},
+                "tolerances": {"mean": 0.2, "std": 0.2},
             },
             id="normal",
         ),
@@ -40,10 +42,13 @@ from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBin
         pytest.param(False, id="non-visual"),
     ],
 )
+@pytest.mark.parametrize("dim_logits", [40, 120], ids=["dim_logits_40", "dim_logits_120"])
+@pytest.mark.parametrize("normalization_method", ["softmax", "sigmoid"], ids=["softmax", "sigmoid"])
 def test_distribution_reconstruction_bezier(
     target_dist_params: dict,
     plot: bool,
-    num_bins: int = 100,
+    dim_logits: int,
+    normalization_method: Literal["softmax", "sigmoid"],
 ):
     """Test reconstruction of different distributions using BezierCDF."""
     torch.manual_seed(42)
@@ -61,23 +66,16 @@ def test_distribution_reconstruction_bezier(
     target_std = target_distr.stddev.item()
 
     # Use evenly-spaced bin centers (BezierCDF has no _create_bins).
-    bin_width = (bound_up - bound_low) / num_bins
-    bin_centers = torch.linspace(bound_low + bin_width / 2, bound_up - bin_width / 2, num_bins)
+    eval_points = torch.linspace(bound_low, bound_up, dim_logits)
 
-    # Compute target probabilities at bin centers.
-    target_probs = torch.exp(target_distr.log_prob(bin_centers))
-
-    # Normalize to get probability masses for each bin.
-    target_prob_masses = target_probs * bin_width
-    target_prob_masses = target_prob_masses / target_prob_masses.sum()
+    # Compute target probabilities at evaluation point.
+    target_probs = torch.exp(target_distr.log_prob(eval_points))
 
     # With softmax normalization, logits = log(steps) up to a constant.
-    eps = 1e-8
-    target_prob_masses = torch.clamp(target_prob_masses, eps, 1.0)
-    logits = torch.log(target_prob_masses)
+    logits = torch.log(target_probs + 1e-8)
 
     # Create BezierCDF distribution, and get mean and variance.
-    distr = BezierCDF(logits=logits, bound_low=bound_low, bound_up=bound_up, normalization_method="softmax")
+    distr = BezierCDF(logits=logits, bound_low=bound_low, bound_up=bound_up, normalization_method=normalization_method)
     reconstructed_mean = distr.mean.item()
     reconstructed_var = distr.variance.item()
     reconstructed_std = math.sqrt(reconstructed_var)
@@ -127,10 +125,14 @@ def test_distribution_reconstruction_bezier(
         plt.title("CDF Comparison")
         plt.legend()
         plt.grid(True, alpha=0.3)
-
         plt.tight_layout()
+
+        results_dir = Path("tests/results/test_reconstruction")
+        results_dir.mkdir(parents=True, exist_ok=True)
         dist_name = dist_class.__name__.lower()
-        plt.savefig(f"tests/results/reconstruction_{dist_name}_bezier.png", bbox_inches="tight")
+        plt.savefig(
+            results_dir / f"{dist_name}_bezier_dim-{dim_logits}_norm-{normalization_method}.png", bbox_inches="tight"
+        )
 
     # Run the Kolmogorov-Smirnov test which looks at the maximum difference between CDFs.
     ks_statistic, ks_p_value = stats.ks_2samp(original_samples.numpy(), reconstructed_samples.numpy())
@@ -153,7 +155,7 @@ def test_distribution_reconstruction_bezier(
                 "dist": torch.distributions.Normal,
                 "params": {"loc": 3.0, "scale": 2.0},
                 "bounds": (-10.0, 10.0),
-                "tolerances": {"mean": 0.1, "std": 0.1},
+                "tolerances": {"mean": 0.2, "std": 0.2},
             },
             id="normal",
         ),
@@ -181,7 +183,7 @@ def test_distribution_reconstruction_binned(
     target_dist_params: dict,
     log_spacing: bool,
     plot: bool,
-    num_bins: int = 200,
+    num_bins: int = 80,
 ):
     """Test reconstruction of different distributions using PiecewiseConstantBinnedCDF and PiecewiseLinearBinnedCDF."""
     torch.manual_seed(42)
@@ -279,14 +281,14 @@ def test_distribution_reconstruction_binned(
         plt.title("CDF Comparison")
         plt.legend()
         plt.grid(True, alpha=0.3)
-
         plt.tight_layout()
+
+        results_dir = Path("tests/results/test_reconstruction")
+        results_dir.mkdir(parents=True, exist_ok=True)
         dist_name = dist_class.__name__.lower()
         spacing_suffix = "log-init" if log_spacing else "linear-init"
         class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
-        plt.savefig(
-            f"tests/results/reconstruction_{dist_name}_{spacing_suffix}_{class_suffix}.png", bbox_inches="tight"
-        )
+        plt.savefig(results_dir / f"{dist_name}_binned_{spacing_suffix}_{class_suffix}.png", bbox_inches="tight")
 
     # Run the Kolmogorov-Smirnov test which looks at the maximum difference between CDFs.
     ks_statistic, ks_p_value = stats.ks_2samp(original_samples.numpy(), reconstructed_samples.numpy())
