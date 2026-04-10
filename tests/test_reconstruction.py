@@ -110,8 +110,15 @@ def test_distribution_reconstruction_bezier(
         # Create comparison plot.
         plt.figure(figsize=(12, 5))
         plt.subplot(1, 2, 1)
-        sns.histplot(original_samples.numpy(), bins=50, alpha=0.7, label=f"Original {dist_class.__name__}")
-        sns.histplot(reconstructed_samples.numpy(), bins=50, alpha=0.7, label="Reconstructed")
+        shared_bins = np.linspace(bound_low, bound_up, 51)
+        sns.histplot(
+            original_samples.numpy(),
+            bins=shared_bins,
+            stat="density",
+            alpha=0.7,
+            label=f"Original {dist_class.__name__}",
+        )
+        sns.histplot(reconstructed_samples.numpy(), bins=shared_bins, stat="density", alpha=0.7, label="Reconstructed")
         plt.xlabel("Value")
         plt.ylabel("Density")
         plt.title("Distribution Comparison")
@@ -266,8 +273,15 @@ def test_distribution_reconstruction_binned(
         # Create comparison plot.
         plt.figure(figsize=(12, 5))
         plt.subplot(1, 2, 1)
-        sns.histplot(original_samples.numpy(), bins=50, alpha=0.7, label=f"Original {dist_class.__name__}")
-        sns.histplot(reconstructed_samples.numpy(), bins=50, alpha=0.7, label="Reconstructed")
+        shared_bins = np.linspace(bound_low, bound_up, 51)
+        sns.histplot(
+            original_samples.numpy(),
+            bins=shared_bins,
+            stat="density",
+            alpha=0.7,
+            label=f"Original {dist_class.__name__}",
+        )
+        sns.histplot(reconstructed_samples.numpy(), bins=shared_bins, stat="density", alpha=0.7, label="Reconstructed")
         plt.xlabel("Value")
         plt.ylabel("Density")
         plt.title("Distribution Comparison")
