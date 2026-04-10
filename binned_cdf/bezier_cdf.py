@@ -8,7 +8,7 @@ _size = torch.Size()
 
 
 class BezierCDF(Distribution):
-    """A continuous probability distribution parameterized by Bernstein polynomials with custom constraints.
+    r"""A continuous probability distribution parameterized by Bernstein polynomials with custom constraints.
 
     The idea is that the CDF is represented as a Bezier curve, which is a weighted sum of Bernstein basis polynomials,
     defined by control points (betas) that are derived from the input logits.
@@ -17,11 +17,19 @@ class BezierCDF(Distribution):
     weights are given by the deltas (softmax of the logits) and the Beta components are defined by the control points.
 
     Since we know that any CDF must start at 0 and end at 1, we can enforce these constraints by fixing the first
-    control point to 0 and the last control point to 1. Moreover, we know that the 1st derivative of the CDF at the
-    boundaries must be 0, which means the 2nd must also be 0 and the 2nd-to-last control point must also be 1.
+    control point to 0 and the last control point to 1.
 
     The spacing of the control points along the domain-axis ("x-axis") is strictly uniform and determined by the
     degree of the Bernstein polynomial, hence, number of input logits.
+
+    Note:
+        Bernstein polynomials converge slowly: the worst-case pointwise approximation error is $O(1/n)$ where $n$ is
+        the polynomial degree, leading to a standard deviation error of $O(1/\sqrt{n})$. However, for smooth CDFs the
+        effective rate is better, and Bernstein density estimators achieve the optimal minimax rate (Babu et al., 2002;
+        Petrone, 1999). This slower convergence is an inherent trade-off for the structural guarantees they provide:
+        monotonicity, values in $[0, 1]$, non-negative PDF, and an unconstrained parameterization (any real-valued
+        logits yield a valid distribution). No other polynomial basis offers all of these simultaneously. In practice,
+        the bias matters less when logits are learned end-to-end via gradient descent, as the optimizer can compensate.
     """
 
     has_rsample = True
@@ -37,8 +45,8 @@ class BezierCDF(Distribution):
         """Initializer.
 
         Args:
-            logits: Raw logits for the probabilities (before sigmoid), of shape (*batch_shape, dim_logits).
-                The logits also determine the degree of the Bernstein polynomial, which is dim_logits + 2.
+            logits: Raw logits for the probabilities before normalization, of shape (*batch_shape, dim_logits).
+                The logits also determine the degree of the Bernstein polynomial $n$.
             bound_low: Lower bound of the distribution support, needs to be finite.
             bound_up: Upper bound of the distribution support, needs to be finite.
             normalization_method: How to normalize the probabilities. Either "sigmoid" or "softmax". With "sigmoid",
@@ -105,35 +113,32 @@ class BezierCDF(Distribution):
         The deltas are the forward differences of the betas, i.e., $ \Delta_i = \beta_{i + 1} - \beta_i $.
 
         Returns:
-            deltas: Weights of the Beta components in the mixture, of shape (*batch_shape, degree - 1)
+            deltas: Weights of the Beta components in the mixture, of shape (*batch_shape, degree)
             betas: Control points of the Bezier curve, of shape (*batch_shape, degree + 1)
         """
+        # The deltas are the steps themselves (forward differences of betas).
         if self.normalization_method == "softmax":
-            steps = torch.softmax(self.logits, dim=-1)  # shape: (*batch_shape, dim_logits)
+            deltas = torch.softmax(self.logits, dim=-1)  # shape: (*batch_shape, dim_logits)
 
         elif self.normalization_method == "sigmoid":
-            raw_steps = torch.sigmoid(self.logits)
-            sum_steps = raw_steps.sum(dim=-1, keepdim=True)
+            raw_deltas = torch.sigmoid(self.logits)
+            sum_deltas = raw_deltas.sum(dim=-1, keepdim=True)
 
             # Prevent division by zero in the rare case where all logits are massively negative.
-            eps = torch.finfo(raw_steps.dtype).eps
-            sum_steps = sum_steps.clamp_min(eps)
+            eps = torch.finfo(raw_deltas.dtype).eps
+            sum_deltas = sum_deltas.clamp_min(eps)
 
-            steps = raw_steps / sum_steps  # shape: (*batch_shape, dim_logits)
+            deltas = raw_deltas / sum_deltas  # shape: (*batch_shape, dim_logits)
 
         else:
             raise ValueError(f"Unknown normalization method: {self.normalization_method}")
 
-        # Pad the deltas with 0 for the flat start and flat end constraints.
-        # deltas = [0, delta_0, ..., delta_{n-1}, 0]
-        zeros = torch.zeros(*steps.shape[:-1], 1, device=steps.device, dtype=steps.dtype)  # shape: (*batch_shape, 1)
-        deltas = torch.cat([zeros, steps, zeros], dim=-1)  # shape: (*batch_shape, dim_logits + 2)
-
-        # Pad the betas with 0 and 1 for the flat start and flat end constraints.
-        # betas = [0, 0, beta_0, ..., beta_{n-1}, 1, 1]
-        inner_betas = torch.cumsum(steps, dim=-1)[..., :-1]
-        ones = torch.ones(*steps.shape[:-1], 2, device=steps.device, dtype=steps.dtype)
-        betas = torch.cat([zeros, zeros, inner_betas, ones], dim=-1)
+        # Pad with zeros and ones to enforce the CDF boundary conditions:
+        # betas = [0, beta_0, ..., beta_{n-2}, 1]
+        zeros = torch.zeros(*deltas.shape[:-1], 1, device=deltas.device, dtype=deltas.dtype)  # shape: (*batch_shape, 1)
+        inner_betas = torch.cumsum(deltas, dim=-1)[..., :-1]
+        ones = torch.ones(*deltas.shape[:-1], 1, device=deltas.device, dtype=deltas.dtype)
+        betas = torch.cat([zeros, inner_betas, ones], dim=-1)
 
         return deltas, betas
 
@@ -166,7 +171,7 @@ class BezierCDF(Distribution):
 
         For a Bernstein polynomial of degree $n$, there are $n + 1$ control points (betas) and $n$ weights (deltas).
         """
-        return self.logits.shape[-1] + 2
+        return self.logits.shape[-1]
 
     @property
     def mean(self) -> torch.Tensor:
