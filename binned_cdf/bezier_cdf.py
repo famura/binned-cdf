@@ -45,7 +45,7 @@ class BezierCDF(Distribution):
         """Initializer.
 
         Args:
-            logits: Raw logits for the probabilities before normalization, of shape (*batch_shape, dim_logits).
+            logits: Raw logits for the probabilities before normalization, of shape (*batch_shape, degree).
                 The logits also determine the degree of the Bernstein polynomial $n$.
             bound_low: Lower bound of the distribution support, needs to be finite.
             bound_up: Upper bound of the distribution support, needs to be finite.
@@ -118,7 +118,7 @@ class BezierCDF(Distribution):
         """
         # The deltas are the steps themselves (forward differences of betas).
         if self.normalization_method == "softmax":
-            deltas = torch.softmax(self.logits, dim=-1)  # shape: (*batch_shape, dim_logits)
+            deltas = torch.softmax(self.logits, dim=-1)  # shape: (*batch_shape, degree)
 
         elif self.normalization_method == "sigmoid":
             raw_deltas = torch.sigmoid(self.logits)
@@ -128,7 +128,7 @@ class BezierCDF(Distribution):
             eps = torch.finfo(raw_deltas.dtype).eps
             sum_deltas = sum_deltas.clamp_min(eps)
 
-            deltas = raw_deltas / sum_deltas  # shape: (*batch_shape, dim_logits)
+            deltas = raw_deltas / sum_deltas  # shape: (*batch_shape, degree)
 
         else:
             raise ValueError(f"Unknown normalization method: {self.normalization_method}")
@@ -292,14 +292,14 @@ class BezierCDF(Distribution):
         # Construct and evaluate the Bezier curve in T space.
         return self._eval_bezier_curve(t, weights=self._betas, binom_coeffs=self._binom_coeffs_cdf)
 
-    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        """Compute the log-probability density at given values.
+    def prob(self, value: torch.Tensor) -> torch.Tensor:
+        """Compute probability density at given values.
 
         Args:
-            value: Values at which to compute the log-PDF. Expected shape: (*sample_shape, *batch_shape).
+            value: Values at which to compute the PDF. Expected shape: (*sample_shape, *batch_shape).
 
         Returns:
-            Log-PDF values corresponding to the input values. Output shape: same as `value` argument.
+            PDF values corresponding to the input values. Output shape: same as `value` argument.
         """
         # Map X in [bound_low, bound_up] to T in [0, 1].
         t = self._map_to_t_space(value)
@@ -310,24 +310,24 @@ class BezierCDF(Distribution):
         # Apply the chain rule: dt/dx = 1 / (U - L).
         pdf_val = val * self.degree / self.support_range
 
-        # Mask out values outside [bound_low, bound_up] to prevent log(0) issues.
+        # Mask out values outside [bound_low, bound_up].
         mask = (value >= self.bound_low) & (value <= self.bound_up)
-        pdf_val = torch.where(mask, pdf_val, torch.zeros_like(pdf_val))
+        return torch.where(mask, pdf_val, torch.zeros_like(pdf_val))
 
-        # Add a tiny epsilon to prevent log(0) exactly at the boundaries.
-        eps = torch.finfo(pdf_val.dtype).eps
-        return torch.log(pdf_val + 2 * eps)
-
-    def prob(self, value: torch.Tensor) -> torch.Tensor:
-        """Compute probability density at given values.
+    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+        """Compute the log-probability density at given values.
 
         Args:
-            value: Values at which to compute the PDF. Expected shape: (*sample_shape, *batch_shape).
+            value: Values at which to compute the log-PDF. Expected shape: (*sample_shape, *batch_shape).
 
         Returns:
-            PDF values corresponding to the input values. Output shape: same as `value` argument.
+            Log-PDF values corresponding to the input values. Output shape: same as `value` argument.
         """
-        return torch.exp(self.log_prob(value))
+        pdf_val = self.prob(value)
+
+        # Add an epsilon to prevent log(0) exactly at the boundaries.
+        eps = torch.finfo(pdf_val.dtype).eps
+        return torch.log(pdf_val + 2 * eps)
 
     def entropy(self, num_quadrature_points: int = 251) -> torch.Tensor:
         r"""Compute differential entropy of the distribution via numerical quadrature.

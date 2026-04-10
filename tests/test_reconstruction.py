@@ -42,17 +42,17 @@ from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBin
         pytest.param(False, id="non-visual"),
     ],
 )
-@pytest.mark.parametrize("dim_logits", [40, 120], ids=["dim_logits_40", "dim_logits_120"])
+@pytest.mark.parametrize("degree", [40, 120], ids=["degree_40", "degree_120"])
 @pytest.mark.parametrize("normalization_method", ["softmax", "sigmoid"], ids=["softmax", "sigmoid"])
 def test_distribution_reconstruction_bezier(
     target_dist_params: dict,
     plot: bool,
-    dim_logits: int,
+    degree: int,
     normalization_method: Literal["softmax", "sigmoid"],
 ):
     """Test reconstruction of different distributions using BezierCDF.
 
-    The tolerances account for the slow O(1/n) convergence of Bernstein polynomials. For example, with dim_logits=40
+    The tolerances account for the slow O(1/n) convergence of Bernstein polynomials. For example, with degree=40
     the std error for a Normal distribution is ~20%, roughly halving when the degree doubles (e.g., ~10% at 80, ~7%
     at 120).
     """
@@ -71,7 +71,7 @@ def test_distribution_reconstruction_bezier(
     target_std = target_distr.stddev.item()
 
     # Use evenly-spaced bin centers (BezierCDF has no _create_bins).
-    eval_points = torch.linspace(bound_low, bound_up, dim_logits)
+    eval_points = torch.linspace(bound_low, bound_up, degree)
 
     # Compute target probabilities at evaluation point.
     target_probs = torch.exp(target_distr.log_prob(eval_points))
@@ -136,7 +136,7 @@ def test_distribution_reconstruction_bezier(
         results_dir.mkdir(parents=True, exist_ok=True)
         dist_name = dist_class.__name__.lower()
         plt.savefig(
-            results_dir / f"{dist_name}_bezier_dim-{dim_logits}_norm-{normalization_method}.png", bbox_inches="tight"
+            results_dir / f"{dist_name}_bezier_dim-{degree}_norm-{normalization_method}.png", bbox_inches="tight"
         )
 
     # Run the Kolmogorov-Smirnov test which looks at the maximum difference between CDFs.

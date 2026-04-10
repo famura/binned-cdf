@@ -11,7 +11,7 @@ from tests.conftest import needs_cuda
 
 
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
-@pytest.mark.parametrize("dim_logits", [1, 2, 7, 1000])
+@pytest.mark.parametrize("degree", [1, 2, 7, 1000])
 @pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize("bound_low,bound_up", [(-5, 5), (0, 5), (-5, 0)])
 @pytest.mark.parametrize(
@@ -23,7 +23,7 @@ from tests.conftest import needs_cuda
 )
 def test_basic_properties_bezier(
     batch_size: int | None,
-    dim_logits: int,
+    degree: int,
     normalization_method: Literal["sigmoid", "softmax"],
     bound_low: int,
     bound_up: int,
@@ -31,10 +31,10 @@ def test_basic_properties_bezier(
 ):
     """Test basic properties of the BezierCDF."""
     device = torch.device("cuda:0" if use_cuda else "cpu")
-    logits = torch.randn((dim_logits,)) if batch_size is None else torch.randn(batch_size, dim_logits)
+    logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
     logits = logits.to(device)
 
-    if dim_logits < 1000:
+    if degree < 1000:
         distr = BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
     else:
         with pytest.raises(ValueError, match="Binomial coefficients became infinite for degree"):
@@ -222,7 +222,7 @@ def test_expand(
 
 
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
-@pytest.mark.parametrize("dim_logits", [2, 50])
+@pytest.mark.parametrize("degree", [2, 50])
 @pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize("bound_low,bound_up", [(-5, 5), (0, 5), (-5, 0)])
 @pytest.mark.parametrize(
@@ -234,7 +234,7 @@ def test_expand(
 )
 def test_prob_random_logits_bezier(
     batch_size: int | None,
-    dim_logits: int,
+    degree: int,
     normalization_method: Literal["sigmoid", "softmax"],
     bound_low: int,
     bound_up: int,
@@ -244,12 +244,12 @@ def test_prob_random_logits_bezier(
     torch.manual_seed(42)
 
     device = torch.device("cuda:0" if use_cuda else "cpu")
-    logits = torch.randn((dim_logits,)) if batch_size is None else torch.randn(batch_size, dim_logits)
+    logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
     logits = logits.to(device)
     distr = BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
 
     # Evaluate at evenly-spaced interior points (excluding bounds to avoid boundary edge cases).
-    num_eval = dim_logits
+    num_eval = degree
     eval_points = torch.linspace(bound_low, bound_up, num_eval + 2, device=device)[1:-1]  # shape: (num_eval,)
     if batch_size is not None:
         eval_points = eval_points.unsqueeze(1).expand(num_eval, batch_size)
@@ -327,7 +327,7 @@ def test_prob_random_logits_binned(
 
 
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
-@pytest.mark.parametrize("dim_logits", [2, 50])
+@pytest.mark.parametrize("degree", [2, 50])
 @pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize("bound_low,bound_up", [(-5, 5), (0, 5), (-5, 0)])
 @pytest.mark.parametrize(
@@ -339,7 +339,7 @@ def test_prob_random_logits_binned(
 )
 def test_prob_bezier(
     batch_size: int | None,
-    dim_logits: int,
+    degree: int,
     normalization_method: Literal["sigmoid", "softmax"],
     bound_low: int,
     bound_up: int,
@@ -349,12 +349,12 @@ def test_prob_bezier(
     torch.manual_seed(42)
 
     device = torch.device("cuda:0" if use_cuda else "cpu")
-    logits = torch.randn((dim_logits,)) if batch_size is None else torch.randn(batch_size, dim_logits)
+    logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
     logits = logits.to(device)
     distr = BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
 
     # Evaluate at evenly-spaced interior points (excluding bounds to avoid boundary edge cases).
-    num_eval = dim_logits
+    num_eval = degree
     eval_points = torch.linspace(bound_low, bound_up, num_eval + 2, device=device)[1:-1]  # shape: (num_eval,)
     if batch_size is not None:
         eval_points = eval_points.unsqueeze(1).expand(num_eval, batch_size)
