@@ -1,3 +1,5 @@
+from typing import Literal
+
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -15,17 +17,21 @@ NewDistribution = PiecewiseLinearBinnedCDF | PiecewiseConstantBinnedCDF | Bezier
 class DensityNet(torch.nn.Module):
     """Neural network for 2D density estimation using PiecewiseLinearBinnedCDF."""
 
-    def __init__(self, num_bins: int, distr_class: NewDistributionType) -> None:
+    def __init__(
+        self, num_bins: int, distr_class: NewDistributionType, normalization_method: Literal["sigmoid", "softmax"]
+    ) -> None:
         """Initialize the network.
 
         Args:
             num_bins: Number of bins for the CDF.
             distr_class: The distribution class to use for the output. One of the new distribution types introduced
                 in this package.
+            normalization_method: Normalization method for the distribution ("sigmoid" or "softmax").
         """
         super().__init__()
         self.num_bins = num_bins
         self.distr_class = distr_class
+        self.normalization_method: Literal["sigmoid", "softmax"] = normalization_method
         self.shared = torch.nn.Sequential(
             torch.nn.Linear(2, 128),
             torch.nn.ReLU(),
@@ -46,12 +52,15 @@ class DensityNet(torch.nn.Module):
         features = self.shared(x)
         logits = self.head(features)
         logits = logits.reshape(*logits.shape[:-1], 2, self.num_bins)
-        return self.distr_class(logits, bound_low=-2.0, bound_up=3.0)
+        return self.distr_class(logits, bound_low=-2.0, bound_up=3.0, normalization_method=self.normalization_method)
 
 
 if __name__ == "__main__":
     """Main function to execute the density estimation example."""
+    # Configure.
     distr_class: NewDistributionType = BezierCDF
+    num_bins = 20 if distr_class == BezierCDF else 100
+    normalization_method: Literal["softmax", "sigmoid"] = "softmax" if distr_class == BezierCDF else "sigmoid"
 
     # Create ground truth data.
     X, _ = make_moons(n_samples=1500, noise=0.1)
@@ -63,7 +72,8 @@ if __name__ == "__main__":
     X = X.to(device)
 
     # Create the model and optimizer.
-    model = DensityNet(num_bins=100, distr_class=distr_class).to(device)
+    model = DensityNet(num_bins=num_bins, distr_class=distr_class, normalization_method=normalization_method)
+    model = model.to(device)
     lr = 5e-4 if distr_class == BezierCDF else 1e-4
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     num_iter = 5000 if distr_class == BezierCDF else 3000

@@ -39,7 +39,7 @@ class BezierCDF(Distribution):
         logits: torch.Tensor,
         bound_low: float = -1e3,
         bound_up: float = 1e3,
-        normalization_method: Literal["sigmoid", "softmax"] = "sigmoid",
+        normalization_method: Literal["sigmoid", "softmax"] = "softmax",
         validate_args: bool | None = None,
     ) -> None:
         """Initializer.
@@ -62,8 +62,11 @@ class BezierCDF(Distribution):
         # Precompute binomial coefficients, and store them on the same device as logits.
         self._binom_coeffs_cdf, self._binom_coeffs_pdf = self._compute_binomial_coefficients()
 
+        # Precompute log-space binomial coefficients for numerically stable log_prob.
+        self._log_binom_coeffs_pdf = self._binom_coeffs_pdf.log()
+
         # Calculate parameters (deltas and betas).
-        self._deltas, self._betas = self._compute_deltas_and_betas()
+        self._deltas, self._betas, self._log_deltas = self._compute_deltas_and_betas()
 
         # Determine batch shape based on the logits. The event shape is scalar since this is a univariate distribution.
         super().__init__(batch_shape=logits.shape[:-1], event_shape=torch.Size([]), validate_args=validate_args)
@@ -106,7 +109,7 @@ class BezierCDF(Distribution):
 
         return coeffs_cdf, coeffs_pdf
 
-    def _compute_deltas_and_betas(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_deltas_and_betas(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         r"""Compute the deltas (Beta mixture component weights) and betas (control points) for the Bezier curve based
         on the given logits.
 
@@ -115,10 +118,12 @@ class BezierCDF(Distribution):
         Returns:
             deltas: Weights of the Beta components in the mixture, of shape (*batch_shape, degree)
             betas: Control points of the Bezier curve, of shape (*batch_shape, degree + 1)
+            log_deltas: Log of the deltas, computed in a numerically stable way, of shape (*batch_shape, degree)
         """
         # The deltas are the steps themselves (forward differences of betas).
         if self.normalization_method == "softmax":
             deltas = torch.softmax(self.logits, dim=-1)  # shape: (*batch_shape, degree)
+            log_deltas = torch.log_softmax(self.logits, dim=-1)
 
         elif self.normalization_method == "sigmoid":
             raw_deltas = torch.sigmoid(self.logits)
@@ -130,6 +135,9 @@ class BezierCDF(Distribution):
 
             deltas = raw_deltas / sum_deltas  # shape: (*batch_shape, degree)
 
+            # log(sigmoid(x) / sum(sigmoid(x))) = logsigmoid(x) - log(sum(sigmoid(x)))
+            log_deltas = torch.nn.functional.logsigmoid(self.logits) - sum_deltas.log()
+
         else:
             raise ValueError(f"Unknown normalization method: {self.normalization_method}")
 
@@ -140,7 +148,7 @@ class BezierCDF(Distribution):
         ones = torch.ones(*deltas.shape[:-1], 1, device=deltas.device, dtype=deltas.dtype)
         betas = torch.cat([zeros, inner_betas, ones], dim=-1)
 
-        return deltas, betas
+        return deltas, betas, log_deltas
 
     def _map_to_t_space(self, value: torch.Tensor) -> torch.Tensor:
         r"""Map values from the original $X$ space to the $T$ space $[0, 1]$ using the bounds."""
@@ -319,7 +327,18 @@ class BezierCDF(Distribution):
         return torch.where(mask, pdf_val, torch.zeros_like(pdf_val))
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
-        """Compute the log-probability density at given values.
+        r"""Compute the log-probability density at given values, entirely in log-space for numerical stability.
+
+        Uses the identity
+
+        $$
+        \log p(x) = \log \frac{n}{U - L}
+                    + \text{logsumexp}_i\!\Big(\log \Delta_i + \log \binom{n-1}{i}
+                    + i \log t + (n-1-i) \log(1-t)\Big)
+        $$
+
+        where $t = (x - L) / (U - L)$ is the normalized input. Every term is computed in log-space,
+        avoiding the numerically problematic ``log(polynomial + eps)`` path.
 
         Args:
             value: Values at which to compute the log-PDF. Expected shape: (*sample_shape, *batch_shape).
@@ -327,11 +346,37 @@ class BezierCDF(Distribution):
         Returns:
             Log-PDF values corresponding to the input values. Output shape: same as `value` argument.
         """
-        pdf_val = self.prob(value)
+        x = value.to(device=self.logits.device, dtype=self.logits.dtype)
+        t = self._map_to_t_space(x)
 
-        # Add an epsilon to prevent log(0) exactly at the boundaries.
-        eps = torch.finfo(pdf_val.dtype).eps
-        return torch.log(pdf_val + 2 * eps)
+        eps = torch.finfo(t.dtype).eps
+        n = self.degree
+
+        # Clamp t away from exact 0/1 to avoid log(0).
+        t_safe = t.clamp(min=eps, max=1 - eps)
+
+        # Indices for the Bernstein basis: i = 0, ..., n-1.
+        i = torch.arange(n, device=t.device, dtype=t.dtype)
+
+        # Expand t for broadcasting: (*sample_shape, *batch_shape, 1).
+        log_t = t_safe.unsqueeze(-1)  # will broadcast with i
+
+        # Log of each Bernstein basis term: log(binom) + i*log(t) + (n-1-i)*log(1-t).
+        log_basis = self._log_binom_coeffs_pdf + i * log_t.log() + (n - 1 - i) * (1 - log_t).log()
+
+        # Log of each weighted term: log(delta_i) + log(basis_i).
+        # _log_deltas shape: (*batch_shape, n),  log_basis shape: (*sample_shape, *batch_shape, n).
+        log_terms = self._log_deltas + log_basis
+
+        # Sum via logsumexp over the last dimension.
+        log_bezier = torch.logsumexp(log_terms, dim=-1)
+
+        # Apply the chain rule: log(n / (U - L)) + log(bezier).
+        log_pdf = math.log(n / self.support_range) + log_bezier
+
+        # Mask values outside the support.
+        mask = (value >= self.bound_low) & (value <= self.bound_up)
+        return torch.where(mask, log_pdf, torch.full_like(log_pdf, -math.inf))
 
     def entropy(self, num_quadrature_points: int = 251) -> torch.Tensor:
         r"""Compute differential entropy of the distribution via numerical quadrature.
@@ -372,6 +417,7 @@ class BezierCDF(Distribution):
         value: torch.Tensor,
         num_iter: int = 8,
         use_newton: bool = True,
+        newton_damping: float = 0.9,
         convergence_eps_factor: float = 20.0,
     ) -> torch.Tensor:
         r"""Compute the inverse CDF, i.e., the quantile function, at the given values.
@@ -380,20 +426,25 @@ class BezierCDF(Distribution):
 
         **Newton's method** uses the PDF as the exact derivative of the CDF and iterates
 
-        $$ x_{k+1} = x_k - \frac{F(x_k) - q}{f(x_k)} $$
+        $$ x_{k+1} = x_k - \alpha \frac{F(x_k) - q}{f(x_k)} $$
 
-        where $F(x)$ is the CDF, $f(x)$ is the PDF, and $q$ is the target quantile in [0, 1].
-        This achieves quadratic convergence (number of correct digits roughly doubles each iteration).
-        Each step is projected back onto the support $[L, U]$ to prevent divergence
-        when the PDF is near zero. The loop exits early once all elements satisfy $|F(x) - q| < \epsilon$.
+        where $F(x)$ is the CDF, $f(x)$ is the PDF, $q$ is the target quantile in [0, 1],
+        and $\alpha \in (0, 1]$ is a damping factor that shrinks each Newton step to improve robustness.
+        A bracket $[L_k, U_k]$ is maintained alongside: whenever $F(x_k) < q$ the lower bound tightens,
+        otherwise the upper bound tightens. If the Newton step would leave the bracket, a bisection
+        step is used instead, guaranteeing monotonic bracket contraction and preventing oscillation.
+        The loop exits early once all elements satisfy $|F(x) - q| < \epsilon$.
 
         **Bisection** halves the search interval each iteration, gaining ~1 bit of precision per step.
 
         Args:
             value: Values in [0, 1] at which to compute the inverse CDF. Expected shape: (*sample_shape, *batch_shape).
-            num_iter: Maximum number of solver iterations. Newton typically converges in ~5-6 iterations;
+            num_iter: Maximum number of solver iterations. Newton typically converges undamped in ~6-7 iterations;
                 bisection needs ~15-20 for full float32 precision.
             use_newton: If True, use Newton's method. If False, use pure bisection.
+            newton_damping: Damping factor in (0, 1] applied to the Newton step. A value of 1.0 gives the
+                full Newton step (quadratic convergence), while smaller values improve robustness
+                at the cost of slower convergence.
             convergence_eps_factor: The factor multiplied by machine epsilon to determine the convergence criterion.
 
         Returns:
@@ -418,39 +469,32 @@ class BezierCDF(Distribution):
 
         # Start from the midpoint of the support.
         mid = torch.full_like(q, (self.bound_low + self.bound_up) / 2)
+        low = torch.full_like(q, self.bound_low)
+        high = torch.full_like(q, self.bound_up)
 
-        if use_newton:
-            # Root finding via Newton's method.
-            for _ in range(num_iter):
-                cdf_mid = self.cdf(mid)
+        for _ in range(num_iter):
+            cdf_mid = self.cdf(mid)
 
-                # Early stop when all elements have converged.
-                if _has_converged(cdf_mid, q, eps, convergence_eps_factor):
-                    break
+            # Early stop when all elements have converged.
+            if _has_converged(cdf_mid, q, eps, convergence_eps_factor):
+                break
 
+            # Tighten the bracket based on CDF evaluation.
+            low = torch.where(cdf_mid < q, mid, low)
+            high = torch.where(cdf_mid >= q, mid, high)
+            bisect_mid = (low + high) / 2
+
+            if use_newton:
                 # Newton step: x_{k+1} = x_k - (F(x_k) - q) / f(x_k).
                 pdf_mid = self.prob(mid)
-                mid = mid - (cdf_mid - q) / pdf_mid.clamp_min(2 * eps)
+                newton_mid = mid - newton_damping * (cdf_mid - q) / pdf_mid.clamp_min(2 * eps)
 
-                # Project back onto the support.
-                mid = mid.clamp(min=self.bound_low, max=self.bound_up)
+                # Use Newton step if it stays within the bracket, otherwise fall back to bisection.
+                in_bracket = (newton_mid >= low) & (newton_mid <= high)
+                mid = torch.where(in_bracket, input=newton_mid, other=bisect_mid)
 
-        else:
-            # Root finding via bisection method.
-            low = torch.full_like(q, self.bound_low)
-            high = torch.full_like(q, self.bound_up)
-
-            for _ in range(num_iter):
-                cdf_mid = self.cdf(mid)
-
-                # Early stop when all elements have converged.
-                if _has_converged(cdf_mid, q, eps, convergence_eps_factor):
-                    break
-
-                # Bisection step: update low or high based on whether cdf(mid) is less than or greater than q.
-                low = torch.where(cdf_mid < q, input=mid, other=low)
-                high = torch.where(cdf_mid >= q, input=mid, other=high)
-                mid = (low + high) / 2
+            else:
+                mid = bisect_mid
 
         return mid
 
