@@ -286,8 +286,10 @@ class BezierCDF(Distribution):
         Returns:
             CDF values in [0, 1] corresponding to the input values. Output shape: same as `value` argument.
         """
+        x = value.to(device=self.logits.device, dtype=self.logits.dtype)
+
         # Map X in [bound_low, bound_up] to T in [0, 1].
-        t = self._map_to_t_space(value)
+        t = self._map_to_t_space(x)
 
         # Construct and evaluate the Bezier curve in T space.
         return self._eval_bezier_curve(t, weights=self._betas, binom_coeffs=self._binom_coeffs_cdf)
@@ -301,8 +303,10 @@ class BezierCDF(Distribution):
         Returns:
             PDF values corresponding to the input values. Output shape: same as `value` argument.
         """
+        x = value.to(device=self.logits.device, dtype=self.logits.dtype)
+
         # Map X in [bound_low, bound_up] to T in [0, 1].
-        t = self._map_to_t_space(value)
+        t = self._map_to_t_space(x)
 
         # Construct and evaluate the Bezier curve in T space.
         val = self._eval_bezier_curve(t, weights=self._deltas, binom_coeffs=self._binom_coeffs_pdf)
@@ -378,12 +382,14 @@ class BezierCDF(Distribution):
             Quantiles in [bound_low, bound_up] corresponding to the input CDF values.
             Output shape: same as `value` argument.
         """
+        q = value.to(device=self.logits.device, dtype=self.logits.dtype)
+
         # Ensure target probability value is strictly in [0, 1].
-        value = torch.clamp(value, 0.0, 1.0)
+        q = torch.clamp(q, 0.0, 1.0)
 
         # Create search interval tensors.
-        low = torch.full_like(value, self.bound_low)
-        high = torch.full_like(value, self.bound_up)
+        low = torch.full_like(q, self.bound_low)
+        high = torch.full_like(q, self.bound_up)
 
         # Run the batched bisection search.
         for _ in range(num_bisect_iter):
@@ -391,9 +397,9 @@ class BezierCDF(Distribution):
             mid = (low + high) / 2
             cdf_mid = self.cdf(mid)
             # If current CDF is too low, the root is to the right. Thus we set the new low to the current mid.
-            low = torch.where(cdf_mid < value, input=mid, other=low)
+            low = torch.where(cdf_mid < q, input=mid, other=low)
             # If current CDF is too high, the root is to the left. Thus we set the new high to the current mid.
-            high = torch.where(cdf_mid >= value, input=mid, other=high)
+            high = torch.where(cdf_mid >= q, input=mid, other=high)
 
         # Return the final midpoint as the best estimate of the root.
         return (low + high) / 2

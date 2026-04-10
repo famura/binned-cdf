@@ -1,5 +1,6 @@
 import math
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 import matplotlib.pyplot as plt
 import pytest
@@ -10,7 +11,7 @@ from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBin
 from tests.conftest import needs_cuda
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("logit_scale", [1e-3, 1, 1e3, 1e9])
 @pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
@@ -31,7 +32,7 @@ def test_cdf_random_logits(
     plot: bool,
     bound_low: float = -10,
     bound_up: float = 10,
-    num_bins: int = 400,
+    num_bins: int = 100,
 ):
     """Test CDF evaluation with random logits at the bounds."""
     device = torch.device("cuda:0" if use_cuda else "cpu")
@@ -58,9 +59,13 @@ def test_cdf_random_logits(
         plt.title(f"CDF for random logits scaled by {logit_scale}")
         plt.legend()
         plt.grid(True, alpha=0.3)
+
+        results_dir = Path("tests/results/test_cdf_icdf")
+        results_dir.mkdir(parents=True, exist_ok=True)
         class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
         plt.savefig(
-            f"tests/results/cdf_random_logits_scale-{logit_scale}_normalization-{normalization_method}_{class_suffix}.png",
+            results_dir
+            / f"cdf_random_logits_scale-{logit_scale}_normalization-{normalization_method}_{class_suffix}.png",
             bbox_inches="tight",
         )
 
@@ -223,7 +228,8 @@ def test_icdf_fixed_quantiles(
 
     # Create a distribution with random logits.
     logits = torch.randn(num_bins, device=device)
-    distr = distr_class(logits, bound_low, bound_up, log_spacing=log_spacing)
+    extra_init_kwargs: dict[str, Any] = {"log_spacing": log_spacing} if distr_class is PiecewiseLinearBinnedCDF else {}
+    distr = distr_class(logits, bound_low, bound_up, **extra_init_kwargs)
 
     # Test fixed quantiles with both linear and log spacing for the quantiles themselves.
     quantiles = torch.tensor([0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99], device=device)

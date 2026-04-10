@@ -1,5 +1,5 @@
 import math
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pytest
@@ -649,11 +649,8 @@ def test_differential_entropy_batched_smoke(
     logits = torch.randn(batch_size, num_bins)
 
     # Create the distribution.
-    init_kwargs = {"logits": logits, "bound_low": bound_low, "bound_up": bound_up, "log_spacing": True}
-    if distr_class is BezierCDF:
-        # BezierCDF does not support log_spacing, so we ignore that argument.
-        init_kwargs.pop("log_spacing")
-    dist = distr_class(**init_kwargs)
+    extra_init_kwargs: dict[str, Any] = {"log_spacing": True} if distr_class is PiecewiseLinearBinnedCDF else {}
+    dist = distr_class(logits, bound_low, bound_up, **extra_init_kwargs)
 
     # Compute the differential entropy for the batch.
     entropy = dist.entropy()
