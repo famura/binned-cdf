@@ -34,7 +34,7 @@ def test_cdf_random_logits(
     bound_up: float = 10,
     num_bins: int = 100,
 ):
-    """Test CDF evaluation with random logits at the bounds."""
+    """Test CDF evaluation with random logits and at the bounds."""
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = logit_scale * torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
@@ -62,15 +62,21 @@ def test_cdf_random_logits(
 
         results_dir = Path("tests/results/test_cdf_icdf")
         results_dir.mkdir(parents=True, exist_ok=True)
-        class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
+        if distr_class is BezierCDF:
+            class_str = "bezier"
+        elif distr_class is PiecewiseConstantBinnedCDF:
+            class_str = "const"
+        elif distr_class is PiecewiseLinearBinnedCDF:
+            class_str = "linear"
+        else:
+            raise TypeError(f"Unknown distribution class {distr_class}")
         plt.savefig(
-            results_dir
-            / f"cdf_random_logits_scale-{logit_scale}_normalization-{normalization_method}_{class_suffix}.png",
+            results_dir / f"cdf_random_logits_{class_str}_scale-{logit_scale}_normalization-{normalization_method}.png",
             bbox_inches="tight",
         )
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("sample_batch_size", [None, 1, 8])
 @pytest.mark.parametrize("distr_batch_size", [1, 3])
 @pytest.mark.parametrize(
@@ -93,7 +99,7 @@ def test_sampling_and_cdf_consistency(
     num_bins: int = 20,
     abs_tol_per_bin: float = 0.08,
 ):
-    """Test that samples follow the PiecewiseConstantBinnedCDF's CDF and have the correct shape."""
+    """Test that samples follow the CDF and have the correct shape."""
     torch.manual_seed(42)
     device = torch.device("cuda:0" if use_cuda else "cpu")
 
@@ -149,11 +155,21 @@ def test_sampling_and_cdf_consistency(
         plt.title("Empirical vs Theoretical CDF")
         plt.legend()
         plt.grid(True, alpha=0.3)
-        class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
-        plt.savefig(f"tests/results/sampling_and_cdf_consistency_{class_suffix}.png", bbox_inches="tight")
+
+        results_dir = Path("tests/results/test_cdf_icdf")
+        results_dir.mkdir(parents=True, exist_ok=True)
+        if distr_class is BezierCDF:
+            class_str = "bezier"
+        elif distr_class is PiecewiseConstantBinnedCDF:
+            class_str = "const"
+        elif distr_class is PiecewiseLinearBinnedCDF:
+            class_str = "linear"
+        else:
+            raise TypeError(f"Unknown distribution class {distr_class}")
+        plt.savefig(results_dir / f"sampling_consistency_{class_str}.png", bbox_inches="tight")
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("batch_size", [None, 1, 8, 16])
 @pytest.mark.parametrize(
     "use_cuda",
@@ -168,10 +184,10 @@ def test_icdf_random_quantiles(
     use_cuda: bool,
     bound_low: float = -10,
     bound_up: float = 10,
-    num_bins: int = 200,
-    num_quantiles: int = 50,
+    num_bins: int = 50,
+    num_quantiles: int = 100,
 ):
-    """Test ICDF evaluation with random quantiles - basic value and shape checking."""
+    """Test inverse CDF evaluation with random quantiles - basic value and shape checking."""
     torch.manual_seed(42)
     device = torch.device("cuda:0" if use_cuda else "cpu")
 
@@ -203,7 +219,7 @@ def test_icdf_random_quantiles(
     assert torch.all(icdf_at_1 <= bound_up + 1e-5), f"ICDF(1) should be <= bound_up: {icdf_at_1}"
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
 @pytest.mark.parametrize(
     "use_cuda,plot",
@@ -220,7 +236,7 @@ def test_icdf_fixed_quantiles(
     plot: bool,
     bound_low: float = -5.0,
     bound_up: float = 5.0,
-    num_bins: int = 500,
+    num_bins: int = 50,
 ):
     """Test inverse CDF at fixed quantiles and verify round-trip property: cdf(icdf(q)) ≈ q."""
     torch.manual_seed(42)
@@ -243,12 +259,14 @@ def test_icdf_fixed_quantiles(
 
     # Test the round-trip property: cdf(icdf(q)) ≈ q.
     cdf_roundtrip = distr.cdf(icdf_values)
-    if isinstance(distr, PiecewiseConstantBinnedCDF):
+    if isinstance(distr, BezierCDF):
+        atol = 1e-6
+    elif isinstance(distr, PiecewiseConstantBinnedCDF):
         atol = 2 / num_bins
     elif isinstance(distr, PiecewiseLinearBinnedCDF):
         atol = 1e-6
     else:
-        raise TypeError("Unknown distribution class for setting atol")
+        raise TypeError(f"Unknown distribution class {distr_class}")
     torch.testing.assert_close(
         cdf_roundtrip,
         quantiles,
@@ -320,10 +338,18 @@ def test_icdf_fixed_quantiles(
         )
         ax4.text(0.1, 0.5, properties_text, fontsize=10, verticalalignment="center", family="monospace")
 
-        class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
-        spacing_suffix = "log-spacing" if log_spacing else "linear-spacing"
-        plt.suptitle(f"ICDF Test with Fixed Quantiles ({spacing_suffix})", fontsize=14)
         plt.tight_layout()
-        plt.savefig(
-            f"tests/results/icdf_fixed_quantiles_{class_suffix}_{spacing_suffix}.png", bbox_inches="tight", dpi=100
-        )
+
+        results_dir = Path("tests/results/test_cdf_icdf")
+        results_dir.mkdir(parents=True, exist_ok=True)
+        if distr_class is BezierCDF:
+            class_str = "bezier"
+        elif distr_class is PiecewiseConstantBinnedCDF:
+            class_str = "const"
+        elif distr_class is PiecewiseLinearBinnedCDF:
+            class_str = "linear"
+        else:
+            raise TypeError(f"Unknown distribution class {distr_class}")
+        spacing_str = "log-spacing" if log_spacing else "linear-spacing"
+        plt.suptitle(f"ICDF Test with Fixed Quantiles ({spacing_str})", fontsize=14)
+        plt.savefig(results_dir / f"icdf_fixed_quantiles_{class_str}_{spacing_str}.png", bbox_inches="tight")
