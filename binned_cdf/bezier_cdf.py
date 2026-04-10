@@ -52,10 +52,10 @@ class BezierCDF(Distribution):
         self.normalization_method = normalization_method
 
         # Precompute binomial coefficients, and store them on the same device as logits.
-        self._cdf_combs, self._pdf_combs = self._compute_binomial_coefficients()
+        self._binom_coeffs_cdf, self._binom_coeffs_pdf = self._compute_binomial_coefficients()
 
         # Calculate parameters (deltas and betas).
-        self.deltas, self.betas = self._compute_coefficients()
+        self._deltas, self._betas = self._compute_deltas_and_betas()
 
         # Determine batch shape based on the logits. The event shape is scalar since this is a univariate distribution.
         super().__init__(batch_shape=logits.shape[:-1], event_shape=torch.Size([]), validate_args=validate_args)
@@ -74,36 +74,35 @@ class BezierCDF(Distribution):
         elements from a set of n elements.
 
         Returns:
-            cdf_combs: Binomial coefficients for the CDF, of shape (degree + 1,)
-            pdf_combs: Binomial coefficients for the PDF, of shape (degree,)
+            coeffs_cdf: Binomial coefficients for the CDF, of shape (degree + 1,)
+            coeffs_pdf: Binomial coefficients for the PDF, of shape (degree,)
         """
-        cdf_combs = torch.tensor(
+        coeffs_cdf = torch.tensor(
             [math.comb(self.degree, i) for i in range(self.degree + 1)],
             device=self.logits.device,
             dtype=self.logits.dtype,
         )
 
-        pdf_combs = torch.tensor(
+        coeffs_pdf = torch.tensor(
             [math.comb(self.degree - 1, i) for i in range(self.degree)],
             device=self.logits.device,
             dtype=self.logits.dtype,
         )
 
         # Check if any of the binomial coefficients became infinite.
-        if torch.isinf(cdf_combs).any() or torch.isinf(pdf_combs).any():
+        if torch.isinf(coeffs_cdf).any() or torch.isinf(coeffs_pdf).any():
             raise ValueError(
                 f"Binomial coefficients became infinite for degree {self.degree}. "
                 "Consider reducing the (last) dimension of the logits, leading to lower degree polynomial."
             )
 
-        return cdf_combs, pdf_combs
+        return coeffs_cdf, coeffs_pdf
 
-    def _compute_coefficients(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def _compute_deltas_and_betas(self) -> tuple[torch.Tensor, torch.Tensor]:
         r"""Compute the deltas (Beta mixture component weights) and betas (control points) for the Bezier curve based
         on the given logits.
 
-        The deltas are the forward differences of the betas
-        $$ \Delta_i = \beta_{i + 1} - \beta_i $$
+        The deltas are the forward differences of the betas, i.e., $ \Delta_i = \beta_{i + 1} - \beta_i $.
 
         Returns:
             deltas: Weights of the Beta components in the mixture, of shape (*batch_shape, degree - 1)
@@ -176,8 +175,9 @@ class BezierCDF(Distribution):
         Returns:
             Tensor of shape (*batch_shape,).
         """
-        i_vals = torch.arange(self.degree, device=self.deltas.device, dtype=self.deltas.dtype)  # shape: (degree,)
-        e_t = torch.sum(self.deltas * (i_vals + 1) / (self.degree + 1), dim=-1)
+        i_vals = torch.arange(self.degree, device=self._deltas.device, dtype=self._deltas.dtype)  # shape: (degree,)
+        e_t = torch.sum(self._deltas * (i_vals + 1) / (self.degree + 1), dim=-1)
+
         return self._map_to_x_space(e_t)
 
     @property
@@ -204,9 +204,9 @@ class BezierCDF(Distribution):
         Returns:
             Tensor of shape (*batch_shape,).
         """
-        i_vals = torch.arange(self.degree, device=self.deltas.device, dtype=self.deltas.dtype)  # shape: (degree,)
-        e_t = torch.sum(self.deltas * (i_vals + 1) / (self.degree + 1), dim=-1)
-        e_t2 = torch.sum(self.deltas * ((i_vals + 1) * (i_vals + 2)) / ((self.degree + 1) * (self.degree + 2)), dim=-1)
+        i_vals = torch.arange(self.degree, device=self._deltas.device, dtype=self._deltas.dtype)  # shape: (degree,)
+        e_t = torch.sum(self._deltas * (i_vals + 1) / (self.degree + 1), dim=-1)
+        e_t2 = torch.sum(self._deltas * ((i_vals + 1) * (i_vals + 2)) / ((self.degree + 1) * (self.degree + 2)), dim=-1)
         var_t = e_t2 - e_t**2
 
         return self.support_range**2 * var_t
@@ -226,6 +226,51 @@ class BezierCDF(Distribution):
         """Constraints that should be satisfied by each argument of this distribution. None for this class."""
         return {"logits": constraints.real}
 
+    def _eval_bezier_curve(
+        self,
+        t: torch.Tensor,
+        weights: torch.Tensor,
+        binom_coeffs: torch.Tensor,
+    ) -> torch.Tensor:
+        r"""Evaluates the Bezier curve, i.e., a Bernstein polynomial, in the $T \in [0, 1]$ space.
+
+        This method computes the weighted sum of Bernstein basis polynomials, where each basis polynomial is defined as
+
+        $$ B_{i, n-1}(t) = \binom{n-1}{i} t^i (1-t)^{n-1-i} $$
+
+        where $n$ is the degree of the polynomial. The polynom's value $p(t)$ is computed as
+
+        $$ p(t) = \sum_{i=0}^{n-1} w_i B_{i, n-1}(t) $$
+
+        where $w_i$ are the weights (either betas for CDF or deltas for PDF).
+
+        Args:
+            t: Normalized input values in [0, 1].
+                Expected shape: (*sample_shape, *batch_shape).
+            weights: The coefficients for the basis polynomials (betas for CDF, deltas for PDF).
+                Expected shape: (*batch_shape, degree + 1).
+            binom_coeffs: Precomputed binomial coefficients corresponding to the polynom's degree.
+                Expected shape: (degree + 1,).
+
+        Returns:
+            The evaluated polynomial values.
+            Output shape: (*sample_shape, *batch_shape)
+        """
+        # Create a tensor of indices: [0, 1, ..., degree], of shape (degree + 1,).
+        i = torch.arange(self.degree + 1, device=t.device, dtype=t.dtype)
+
+        # Add an empty dimension to t for broadcasting, resulting in shape: (*sample_shape, *batch_shape, 1).
+        t_exp = t.unsqueeze(-1)
+
+        # Compute the entire basis in one shot.
+        # PyTorch broadcasts the shapes to shape (*sample_shape, *batch_shape, degree + 1)
+        basis = binom_coeffs * (t_exp**i) * ((1 - t_exp) ** (self.degree - i))
+
+        # Multiply by weights and sum across the final dimension, resulting in shape (*sample_shape, *batch_shape).
+        val = torch.sum(weights * basis, dim=-1)
+
+        return val
+
     def cdf(self, value: torch.Tensor) -> torch.Tensor:
         """Compute cumulative distribution function at given values.
 
@@ -238,11 +283,8 @@ class BezierCDF(Distribution):
         # Map X in [bound_low, bound_up] to T in [0, 1].
         t = self._map_to_t_space(value)
 
-        # Evaluate Bezier curve defined in the T space.
-        val = torch.zeros_like(t)
-        for i in range(self.degree + 1):
-            basis = self._cdf_combs[i] * (t**i) * ((1 - t) ** (self.degree - i))
-            val += self.betas[..., i] * basis
+        # Construct and evaluate the Bezier curve in T space.
+        val = self._eval_bezier_curve(t, weights=self._betas, binom_coeffs=self._binom_coeffs_cdf)
 
         return val
 
@@ -258,10 +300,8 @@ class BezierCDF(Distribution):
         # Map X in [bound_low, bound_up] to T in [0, 1].
         t = self._map_to_t_space(value)
 
-        val = torch.zeros_like(t)
-        for i in range(self.degree):
-            basis = self._pdf_combs[i] * (t**i) * ((1 - t) ** (self.degree - 1 - i))
-            val += self.deltas[..., i] * basis
+        # Construct and evaluate the Bezier curve in T space.
+        val = self._eval_bezier_curve(t, weights=self._deltas, binom_coeffs=self._binom_coeffs_pdf)
 
         # Apply the chain rule: dt/dx = 1 / (U - L).
         pdf_val = val * self.degree / self.support_range
