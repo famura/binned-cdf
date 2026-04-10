@@ -556,60 +556,108 @@ def test_shannon_entropy(
         ),
     ],
 )
-@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
+@pytest.mark.parametrize(
+    "distr_class,log_spacing,num_bins",
+    [
+        pytest.param(BezierCDF, None, 95, id="BezierCDF"),
+        pytest.param(PiecewiseLinearBinnedCDF, False, 10, id="PiecewiseLinearBinnedCDF-linear_spacing"),
+        pytest.param(PiecewiseLinearBinnedCDF, True, 40, id="PiecewiseLinearBinnedCDF-log_spacing"),
+    ],
+)
 def test_differential_entropy(
     target_dist_params: dict,
-    log_spacing: bool,
-    num_bins: int = 200,
+    distr_class: type[BezierCDF] | type[PiecewiseLinearBinnedCDF],
+    log_spacing: bool | None,
+    num_bins: int,
 ):
     """Test differential entropy computation against theoretical values from known distributions."""
     torch.manual_seed(42)
     np.random.seed(42)
 
     # Extract parameters from the parametrized input.
-    dist_class = target_dist_params["dist"]
-    dist_params = target_dist_params["params"]
+    target_distr_class = target_dist_params["dist"]
+    target_distr_params = target_dist_params["params"]
     bound_low, bound_up = target_dist_params["bounds"]
     rel_tol = target_dist_params["rel_tol"]
 
     # Create target distribution, and get the entropy.
-    target_distr = dist_class(**dist_params)
+    target_distr = target_distr_class(**target_distr_params)
     target_entropy = target_distr.entropy().item()
 
-    # Use the PiecewiseLinearBinnedCDF's own bin construction to ensure matching shapes between distributions.
-    _, bin_centers, bin_widths = PiecewiseLinearBinnedCDF._create_bins(
-        num_bins=num_bins,
-        bound_low=bound_low,
-        bound_up=bound_up,
-        log_spacing=log_spacing,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-    )
+    if distr_class is BezierCDF:
+        # BezierCDF uses evenly-spaced evaluation points and log-probabilities as logits.
+        eval_points = torch.linspace(bound_low, bound_up, num_bins)
+        target_probs = torch.exp(target_distr.log_prob(eval_points))
+        logits = torch.log(target_probs + 1e-8)
+        dist = BezierCDF(logits=logits.unsqueeze(0), bound_low=bound_low, bound_up=bound_up)
+    elif distr_class is PiecewiseLinearBinnedCDF:
+        # Use the distr_class's own bin construction to ensure matching shapes between distributions.
+        assert log_spacing is not None, "log_spacing must be specified for PiecewiseLinearBinnedCDF"
+        _, bin_centers, bin_widths = PiecewiseLinearBinnedCDF._create_bins(
+            num_bins=num_bins,
+            bound_low=bound_low,
+            bound_up=bound_up,
+            log_spacing=log_spacing,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
 
-    # Compute target probabilities at bin centers, and normalize to get probability masses for each bin.
-    target_probs = torch.exp(target_distr.log_prob(bin_centers))
-    target_prob_masses = target_probs * bin_widths
-    target_prob_masses = target_prob_masses / target_prob_masses.sum()
+        # Compute target probabilities at bin centers, and normalize to get probability masses for each bin.
+        target_probs = torch.exp(target_distr.log_prob(bin_centers))
+        target_prob_masses = target_probs * bin_widths
+        target_prob_masses = target_prob_masses / target_prob_masses.sum()
 
-    # Convert probabilities to logits (inverse sigmoid).
-    eps = 1e-8
-    target_prob_masses = torch.clamp(target_prob_masses, eps, 1 - eps)
-    logits = torch.log(target_prob_masses / (1 - target_prob_masses))
+        # Convert probabilities to logits (inverse sigmoid).
+        eps = 1e-8
+        target_prob_masses = torch.clamp(target_prob_masses, eps, 1 - eps)
+        logits = torch.log(target_prob_masses / (1 - target_prob_masses))
 
-    # Create PiecewiseLinearBinnedCDF distribution, and compute reconstructed entropy.
-    dist = PiecewiseLinearBinnedCDF(
-        logits=logits.unsqueeze(0),
-        bound_low=bound_low,
-        bound_up=bound_up,
-        log_spacing=log_spacing,
-    )
+        dist = PiecewiseLinearBinnedCDF(
+            logits=logits.unsqueeze(0),
+            bound_low=bound_low,
+            bound_up=bound_up,
+            log_spacing=log_spacing,
+        )
+
+    else:
+        raise NotImplementedError(f"Unsupported distribution class: {distr_class}")
+
     reconstructed_entropy = dist.entropy().item()
 
     # Check that reconstructed entropy is close to theoretical value.
+    # BezierCDF has higher approximation error due to O(1/n) Bernstein polynomial convergence.
+    effective_rel_tol = 0.10 if distr_class is BezierCDF else rel_tol
     torch.testing.assert_close(
         reconstructed_entropy,
         target_entropy,
-        rtol=rel_tol,
+        rtol=effective_rel_tol,
         atol=1e-6,
         msg=f"Entropy mismatch: reconstructed={reconstructed_entropy:.6f}, theoretical={target_entropy:.6f}",
     )
+
+
+@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseLinearBinnedCDF])
+def test_differential_entropy_batched_smoke(
+    distr_class: type[BezierCDF] | type[PiecewiseLinearBinnedCDF],
+    batch_size: int = 4,
+    num_bins: int = 20,
+    bound_low: float = -5.0,
+    bound_up: float = 5.0,
+):
+    """Smoke test for differential entropy computation in batched distributions."""
+    # Create random logits for a batched distribution.
+    logits = torch.randn(batch_size, num_bins)
+
+    # Create the distribution.
+    init_kwargs = {"logits": logits, "bound_low": bound_low, "bound_up": bound_up, "log_spacing": True}
+    if distr_class is BezierCDF:
+        # BezierCDF does not support log_spacing, so we ignore that argument.
+        init_kwargs.pop("log_spacing")
+    dist = distr_class(**init_kwargs)
+
+    # Compute the differential entropy for the batch.
+    entropy = dist.entropy()
+
+    # Check that the output has the correct shape and is finite.
+    assert entropy.shape == (batch_size,), f"Expected entropy shape {(batch_size,)}, got {entropy.shape}"
+    assert torch.all(torch.isfinite(entropy)), "Entropy values should be finite"

@@ -271,13 +271,11 @@ class BezierCDF(Distribution):
         t_expanded = t.unsqueeze(-1)
 
         # Compute the entire basis in one shot.
-        # PyTorch broadcasts the shapes to shape (*sample_shape, *batch_shape, degree + 1)
+        # PyTorch broadcasts the shapes to shape (*sample_shape, *batch_shape, degree).
         basis = binom_coeffs * (t_expanded**i) * ((1 - t_expanded) ** (n - 1 - i))
 
         # Multiply by weights and sum across the final dimension, resulting in shape (*sample_shape, *batch_shape).
-        val = torch.sum(weights * basis, dim=-1)
-
-        return val
+        return torch.sum(weights * basis, dim=-1)
 
     def cdf(self, value: torch.Tensor) -> torch.Tensor:
         """Compute cumulative distribution function at given values.
@@ -330,6 +328,40 @@ class BezierCDF(Distribution):
             PDF values corresponding to the input values. Output shape: same as `value` argument.
         """
         return torch.exp(self.log_prob(value))
+
+    def entropy(self, num_quadrature_points: int = 251) -> torch.Tensor:
+        r"""Compute differential entropy of the distribution via numerical quadrature.
+
+        $$ H(X) = -\int_{L}^{U} p(x) \log p(x) \, dx $$
+
+        where $L$ and $U$ are the lower and upper bounds of the distribution support, respectively.
+
+        Args:
+            num_quadrature_points: Number of points for the trapezoidal rule approximation.
+
+        Returns:
+            Tensor of shape (*batch_shape,).
+        """
+        # Create quadrature points over the support.
+        x = torch.linspace(
+            self.bound_low, self.bound_up, num_quadrature_points, device=self.logits.device, dtype=self.logits.dtype
+        )
+
+        # For batched distributions, expand quadrature points to shape (num_quadrature_points, *batch_shape)
+        # so prob/log_prob receive values with explicit batch dimensions.
+        x_eval = x.reshape(num_quadrature_points, *([1] * len(self.batch_shape)))
+        x_eval = x_eval.expand(num_quadrature_points, *self.batch_shape)
+
+        # Evaluate PDF at quadrature points.
+        pdf_val = self.prob(x_eval)  # shape: (num_quadrature_points, *batch_shape)
+
+        # Compute the integrand: -p(x) * log(p(x)), with epsilon for stability.
+        eps = torch.finfo(pdf_val.dtype).eps
+        log_pdf = torch.log(pdf_val + 2 * eps)
+        integrand = -pdf_val * log_pdf  # shape: (num_quadrature_points, *batch_shape)
+
+        # Integrate using the trapezoidal rule.
+        return torch.trapezoid(integrand, x, dim=0)
 
     def icdf(self, value: torch.Tensor, num_bisect_iter: int = 20) -> torch.Tensor:
         """Compute the inverse CDF, i.e., the quantile function, at the given values.
