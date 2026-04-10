@@ -146,10 +146,25 @@ class BezierCDF(Distribution):
         return t * self.support_range + self.bound_low
 
     @property
-    def degree(self) -> int:
-        """Get the degree of the Bernstein polynomial based on the number of logits.
+    def support(self) -> constraints.Constraint:
+        """Support of this distribution."""
+        return constraints.interval(self.bound_low, self.bound_up)
 
-        For a Bernstein polynomial of degree n, there are n + 1 control points (betas) and n deltas (weights).
+    @property
+    def support_range(self) -> float:
+        """Range of the support, i.e., upper bound - lower bound."""
+        return self.bound_up - self.bound_low
+
+    @property
+    def arg_constraints(self) -> dict[str, constraints.Constraint]:
+        """Constraints that should be satisfied by each argument of this distribution. None for this class."""
+        return {"logits": constraints.real}
+
+    @property
+    def degree(self) -> int:
+        r"""Get the degree $n$ of the Bernstein polynomial based on the number of logits.
+
+        For a Bernstein polynomial of degree $n$, there are $n + 1$ control points (betas) and $n$ weights (deltas).
         """
         return self.logits.shape[-1] + 2
 
@@ -175,8 +190,8 @@ class BezierCDF(Distribution):
         Returns:
             Tensor of shape (*batch_shape,).
         """
-        i_vals = torch.arange(self.degree, device=self._deltas.device, dtype=self._deltas.dtype)  # shape: (degree,)
-        e_t = torch.sum(self._deltas * (i_vals + 1) / (self.degree + 1), dim=-1)
+        i = torch.arange(self.degree, device=self._deltas.device, dtype=self._deltas.dtype)  # shape: (degree,)
+        e_t = torch.sum(self._deltas * (i + 1) / (self.degree + 1), dim=-1)
 
         return self._map_to_x_space(e_t)
 
@@ -204,27 +219,12 @@ class BezierCDF(Distribution):
         Returns:
             Tensor of shape (*batch_shape,).
         """
-        i_vals = torch.arange(self.degree, device=self._deltas.device, dtype=self._deltas.dtype)  # shape: (degree,)
-        e_t = torch.sum(self._deltas * (i_vals + 1) / (self.degree + 1), dim=-1)
-        e_t2 = torch.sum(self._deltas * ((i_vals + 1) * (i_vals + 2)) / ((self.degree + 1) * (self.degree + 2)), dim=-1)
+        i = torch.arange(self.degree, device=self._deltas.device, dtype=self._deltas.dtype)  # shape: (degree,)
+        e_t = torch.sum(self._deltas * (i + 1) / (self.degree + 1), dim=-1)
+        e_t2 = torch.sum(self._deltas * ((i + 1) * (i + 2)) / ((self.degree + 1) * (self.degree + 2)), dim=-1)
         var_t = e_t2 - e_t**2
 
         return self.support_range**2 * var_t
-
-    @property
-    def support(self) -> constraints.Constraint:
-        """Support of this distribution."""
-        return constraints.interval(self.bound_low, self.bound_up)
-
-    @property
-    def support_range(self) -> float:
-        """Range of the support, i.e., upper bound - lower bound."""
-        return self.bound_up - self.bound_low
-
-    @property
-    def arg_constraints(self) -> dict[str, constraints.Constraint]:
-        """Constraints that should be satisfied by each argument of this distribution. None for this class."""
-        return {"logits": constraints.real}
 
     def _eval_bezier_curve(
         self,
@@ -248,23 +248,26 @@ class BezierCDF(Distribution):
             t: Normalized input values in [0, 1].
                 Expected shape: (*sample_shape, *batch_shape).
             weights: The coefficients for the basis polynomials (betas for CDF, deltas for PDF).
-                Expected shape: (*batch_shape, degree + 1).
+                Expected shape: (*batch_shape, n + 1).
             binom_coeffs: Precomputed binomial coefficients corresponding to the polynom's degree.
-                Expected shape: (degree + 1,).
+                Expected shape: (n,).
 
         Returns:
             The evaluated polynomial values.
             Output shape: (*sample_shape, *batch_shape)
         """
-        # Create a tensor of indices: [0, 1, ..., degree], of shape (degree + 1,).
-        i = torch.arange(self.degree + 1, device=t.device, dtype=t.dtype)
+        # Get n which can be != self.degree as we use this method for both CDF and PDF which have different degrees.
+        n = binom_coeffs.shape[0]
+
+        # Create a tensor of indices matching the number of basis polynomials.
+        i = torch.arange(n, device=t.device, dtype=t.dtype)
 
         # Add an empty dimension to t for broadcasting, resulting in shape: (*sample_shape, *batch_shape, 1).
-        t_exp = t.unsqueeze(-1)
+        t_expanded = t.unsqueeze(-1)
 
         # Compute the entire basis in one shot.
         # PyTorch broadcasts the shapes to shape (*sample_shape, *batch_shape, degree + 1)
-        basis = binom_coeffs * (t_exp**i) * ((1 - t_exp) ** (self.degree - i))
+        basis = binom_coeffs * (t_expanded**i) * ((1 - t_expanded) ** (n - 1 - i))
 
         # Multiply by weights and sum across the final dimension, resulting in shape (*sample_shape, *batch_shape).
         val = torch.sum(weights * basis, dim=-1)
@@ -284,9 +287,7 @@ class BezierCDF(Distribution):
         t = self._map_to_t_space(value)
 
         # Construct and evaluate the Bezier curve in T space.
-        val = self._eval_bezier_curve(t, weights=self._betas, binom_coeffs=self._binom_coeffs_cdf)
-
-        return val
+        return self._eval_bezier_curve(t, weights=self._betas, binom_coeffs=self._binom_coeffs_cdf)
 
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         """Compute the log-probability density at given values.
@@ -357,6 +358,7 @@ class BezierCDF(Distribution):
             # If current CDF is too high, the root is to the left. Thus we set the new high to the current mid.
             high = torch.where(cdf_mid >= value, input=mid, other=high)
 
+        # Return the final midpoint as the best estimate of the root.
         return (low + high) / 2
 
     def rsample(self, sample_shape: torch.Size | list[int] | tuple[int, ...] = _size) -> torch.Tensor:
@@ -371,15 +373,15 @@ class BezierCDF(Distribution):
         # Determine the final shape of the output tensor.
         shape = self._extended_shape(sample_shape)
 
-        # 1. Sample uniform noise, u ~ U(0, 1)
+        # Sample uniform noise, u ~ U(0, 1).
         u = torch.rand(shape, dtype=self.logits.dtype, device=self.logits.device)
 
-        # 2. Find the root (the sample x) without tracking gradients for the loop
+        # Find the root (the sample x) without tracking gradients for the loop.
         with torch.no_grad():
             x_root = self.icdf(u)
 
-        # 3. Apply the implicit differentiation trick
-        # Evaluate CDF to connect the parameters (theta) to the computational graph
+        # Apply the implicit differentiation trick, i.e., evaluate CDF to connect the parameters to the
+        # computational graph.
         cdf_val = self.cdf(x_root)
 
         # Evaluate PDF and detach it to act as the constant denominator.
@@ -390,6 +392,4 @@ class BezierCDF(Distribution):
         pdf_val = pdf_val.clamp_min(2 * eps)
 
         # Attach the exact reparameterized gradient.
-        x = x_root + (u - cdf_val) / pdf_val
-
-        return x
+        return x_root + (u - cdf_val) / pdf_val

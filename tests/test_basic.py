@@ -222,7 +222,7 @@ def test_expand(
 
 
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
-@pytest.mark.parametrize("num_bins", [2, 200])
+@pytest.mark.parametrize("dim_logits", [2, 50])
 @pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize("bound_low,bound_up", [(-5, 5), (0, 5), (-5, 0)])
 @pytest.mark.parametrize(
@@ -234,7 +234,7 @@ def test_expand(
 )
 def test_prob_random_logits_bezier(
     batch_size: int | None,
-    num_bins: int,
+    dim_logits: int,
     normalization_method: Literal["sigmoid", "softmax"],
     bound_low: int,
     bound_up: int,
@@ -244,12 +244,12 @@ def test_prob_random_logits_bezier(
     torch.manual_seed(42)
 
     device = torch.device("cuda:0" if use_cuda else "cpu")
-    logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
+    logits = torch.randn((dim_logits,)) if batch_size is None else torch.randn(batch_size, dim_logits)
     logits = logits.to(device)
     distr = BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
 
     # Evaluate at evenly-spaced interior points (excluding bounds to avoid boundary edge cases).
-    num_eval = num_bins
+    num_eval = dim_logits
     eval_points = torch.linspace(bound_low, bound_up, num_eval + 2, device=device)[1:-1]  # shape: (num_eval,)
     if batch_size is not None:
         eval_points = eval_points.unsqueeze(1).expand(num_eval, batch_size)
@@ -326,6 +326,70 @@ def test_prob_random_logits_binned(
     assert prob_at_up.shape == expected_scalar_shape
 
 
+@pytest.mark.parametrize("batch_size", [None, 1, 8])
+@pytest.mark.parametrize("dim_logits", [2, 50])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("bound_low,bound_up", [(-5, 5), (0, 5), (-5, 0)])
+@pytest.mark.parametrize(
+    "use_cuda",
+    [
+        pytest.param(False, id="cpu"),
+        pytest.param(True, marks=needs_cuda, id="cuda"),
+    ],
+)
+def test_prob_bezier(
+    batch_size: int | None,
+    dim_logits: int,
+    normalization_method: Literal["sigmoid", "softmax"],
+    bound_low: int,
+    bound_up: int,
+    use_cuda: bool,
+):
+    """Test prob() returns valid densities and is consistent with log_prob() for BezierCDF."""
+    torch.manual_seed(42)
+
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    logits = torch.randn((dim_logits,)) if batch_size is None else torch.randn(batch_size, dim_logits)
+    logits = logits.to(device)
+    distr = BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
+
+    # Evaluate at evenly-spaced interior points (excluding bounds to avoid boundary edge cases).
+    num_eval = dim_logits
+    eval_points = torch.linspace(bound_low, bound_up, num_eval + 2, device=device)[1:-1]  # shape: (num_eval,)
+    if batch_size is not None:
+        eval_points = eval_points.unsqueeze(1).expand(num_eval, batch_size)
+        expected_shape: tuple[int, ...] = (num_eval, batch_size)
+    else:
+        expected_shape: tuple[int, ...] = (num_eval,)  # type: ignore[no-redef]
+
+    prob_vals = distr.prob(eval_points)
+    assert prob_vals.device == device
+    assert prob_vals.shape == expected_shape
+    assert torch.all(prob_vals >= 0), "prob() must be non-negative"
+    assert torch.all(torch.isfinite(prob_vals)), "prob() at interior points should be finite"
+
+    # prob() and log_prob() must be consistent: prob == exp(log_prob).
+    log_prob_vals = distr.log_prob(eval_points)
+    assert torch.allclose(prob_vals, torch.exp(log_prob_vals), atol=1e-5), "prob() and exp(log_prob()) should match"
+
+    # Evaluate at the bounds.
+    expected_scalar_shape = torch.Size([]) if batch_size is None else torch.Size([batch_size])
+    prob_at_low = distr.prob(torch.tensor(distr.bound_low, device=device))
+    prob_at_up = distr.prob(torch.tensor(distr.bound_up, device=device))
+    assert prob_at_low.shape == expected_scalar_shape
+    assert prob_at_up.shape == expected_scalar_shape
+    assert torch.all(prob_at_low >= 0)
+    assert torch.all(prob_at_up >= 0)
+    assert torch.all(torch.isfinite(prob_at_low))
+    assert torch.all(torch.isfinite(prob_at_up))
+
+    # Consistency at bounds too.
+    log_prob_at_low = distr.log_prob(torch.tensor(distr.bound_low, device=device))
+    log_prob_at_up = distr.log_prob(torch.tensor(distr.bound_up, device=device))
+    assert torch.allclose(prob_at_low, torch.exp(log_prob_at_low), atol=1e-5)
+    assert torch.allclose(prob_at_up, torch.exp(log_prob_at_up), atol=1e-5)
+
+
 @pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
 @pytest.mark.parametrize("num_bins", [2, 200])  # 2 is an edge case for log-spacing
@@ -338,15 +402,15 @@ def test_prob_random_logits_binned(
         pytest.param(True, marks=needs_cuda, id="cuda"),
     ],
 )
-def test_prob(
-    distr_class: type[BezierCDF] | type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
+def test_prob_binned(
+    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     batch_size: int | None,
     num_bins: int,
     log_spacing: bool,
     normalization_method: Literal["sigmoid", "softmax"],
     use_cuda: bool,
 ):
-    """Test prob() returns valid densities and is consistent with log_prob()."""
+    """Test prob() returns valid densities and is consistent with log_prob() for binned distributions."""
     torch.manual_seed(42)
 
     device = torch.device("cuda:0" if use_cuda else "cpu")
