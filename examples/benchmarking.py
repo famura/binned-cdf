@@ -8,6 +8,18 @@ import torch.utils.benchmark as benchmark
 from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
 
 ResultsMap = dict[str, tuple[float, int]]
+BenchmarkInputs = tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+
+
+def make_benchmark_inputs(shape: tuple[int, ...], seed: int) -> BenchmarkInputs:
+    """Create deterministic benchmark inputs for a given shape."""
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(seed)
+
+    logits = torch.randn(*shape, generator=gen)
+    y = torch.randn(shape[:-1], generator=gen)
+    quantiles = torch.rand(shape[:-1], generator=gen)
+    return logits, y, quantiles
 
 
 def _short_name(cls_or_name: type | str) -> str:
@@ -119,6 +131,7 @@ def report_results(all_results: dict[str, ResultsMap | None]) -> None:
 def benchmark_shape(
     distr_classes: list[type],
     shape: tuple[int, ...],
+    inputs: BenchmarkInputs,
     num_iter: int = 100,
 ) -> None:
     """Benchmarks all given distribution classes for a specific logit shape and prints a comparison table.
@@ -126,12 +139,11 @@ def benchmark_shape(
     Args:
         distr_classes: Distribution classes to benchmark.
         shape: Shape of the input logits tensor (*batch_shape, num_bins).
+        inputs: Precomputed (logits, y, quantiles) tensors for this shape.
         num_iter: Number of iterations for timing measurements.
     """
     print(f"\n===== Benchmarking Shape {shape} =====")
-    logits = torch.randn(*shape)
-    y = torch.randn(shape[:-1])
-    quantiles = torch.rand_like(y)
+    logits, y, quantiles = inputs
 
     all_results = {cls.__name__: benchmark_class(cls, logits, y, quantiles, num_iter) for cls in distr_classes}
     report_results(all_results)
@@ -145,6 +157,7 @@ if __name__ == "__main__":
     torch.set_default_device("cpu")
     torch.set_default_dtype(torch.float32)
     print("Running benchmarks on CPU with float32.")
+    print("Using deterministic benchmark inputs.")
 
     # Define use cases (batch size, sequence length, etc.)
     test_shapes = [
@@ -156,5 +169,8 @@ if __name__ == "__main__":
         (10, 512, 512),  # batch image-like
     ]
 
+    base_seed = 20260410
+    shape_inputs = {shape: make_benchmark_inputs(shape, seed=base_seed + idx) for idx, shape in enumerate(test_shapes)}
+
     for shape in test_shapes:
-        benchmark_shape(DISTR_CLASSES, shape)
+        benchmark_shape(DISTR_CLASSES, shape, inputs=shape_inputs[shape])

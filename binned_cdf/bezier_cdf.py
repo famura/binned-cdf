@@ -367,7 +367,13 @@ class BezierCDF(Distribution):
         # Integrate using the trapezoidal rule.
         return torch.trapezoid(integrand, x, dim=0)
 
-    def icdf(self, value: torch.Tensor, num_iter: int = 10, use_newton: bool = True) -> torch.Tensor:
+    def icdf(
+        self,
+        value: torch.Tensor,
+        num_iter: int = 8,
+        use_newton: bool = True,
+        convergence_eps_factor: float = 20.0,
+    ) -> torch.Tensor:
         r"""Compute the inverse CDF, i.e., the quantile function, at the given values.
 
         Two solvers are available for inverting $ F(x) - q = 0 $:
@@ -378,63 +384,75 @@ class BezierCDF(Distribution):
 
         where $F(x)$ is the CDF, $f(x)$ is the PDF, and $q$ is the target quantile in [0, 1].
         This achieves quadratic convergence (number of correct digits roughly doubles each iteration).
-        If a Newton step would leave the current bracket $[L, U]$, the solver falls back to a bisection step for that
-        element, guaranteeing global convergence.
+        Each step is projected back onto the support $[L, U]$ to prevent divergence
+        when the PDF is near zero. The loop exits early once all elements satisfy $|F(x) - q| < \epsilon$.
 
         **Bisection** halves the search interval each iteration, gaining ~1 bit of precision per step.
 
         Args:
             value: Values in [0, 1] at which to compute the inverse CDF. Expected shape: (*sample_shape, *batch_shape).
-            num_iter: Number of solver iterations. Newton converges in ~5-6 iterations; bisection needs ~15-20
-                for full float32 precision.
-            use_newton: If True, use Newton's method with bisection fallback. If False, use pure bisection.
+            num_iter: Maximum number of solver iterations. Newton typically converges in ~5-6 iterations;
+                bisection needs ~15-20 for full float32 precision.
+            use_newton: If True, use Newton's method. If False, use pure bisection.
+            convergence_eps_factor: The factor multiplied by machine epsilon to determine the convergence criterion.
 
         Returns:
             Quantiles in [bound_low, bound_up] corresponding to the input CDF values.
             Output shape: same as `value` argument.
         """
+
+        def _has_converged(cdf_mid: torch.Tensor, q: torch.Tensor, eps: float, convergence_eps_factor: float) -> bool:
+            """Check if all elements have converged based on the CDF values at the current midpoint.
+
+            We use the somewhat arbitrary criterion that the maximum absolute deviation across all elements is less than
+            `convergence_eps_factor` times machine epsilon.
+            """
+            abs_deviation = (cdf_mid - q).abs().max()
+            return bool(abs_deviation < convergence_eps_factor * eps)
+
         q = value.to(device=self.logits.device, dtype=self.logits.dtype)
         eps = torch.finfo(q.dtype).eps
 
         # Ensure target probability value is strictly in [0, 1].
         q = torch.clamp(q, 0.0, 1.0)
 
-        # Create search interval tensors.
-        low = torch.full_like(q, self.bound_low)
-        high = torch.full_like(q, self.bound_up)
-        mid = (low + high) / 2
+        # Start from the midpoint of the support.
+        mid = torch.full_like(q, (self.bound_low + self.bound_up) / 2)
 
-        # Small absolute tolerance for the bracket check.  When Newton converges, floating-point jitter
-        # can push the next proposal just past a bracket boundary.  Without slack this rejects the
-        # (near-perfect) Newton step and falls back to bisection, destroying convergence.
-        bracket_tol = 2 * eps * self.support_range
+        if use_newton:
+            # Root finding via Newton's method.
+            for _ in range(num_iter):
+                cdf_mid = self.cdf(mid)
 
-        # Iteratively narrow the search interval.
-        for _ in range(num_iter):
-            cdf_mid = self.cdf(mid)
+                # Early stop when all elements have converged.
+                if _has_converged(cdf_mid, q, eps, convergence_eps_factor):
+                    break
 
-            if use_newton:
                 # Newton step: x_{k+1} = x_k - (F(x_k) - q) / f(x_k).
                 pdf_mid = self.prob(mid)
-                pdf_safe = pdf_mid.clamp_min(2 * eps)
-                newton_mid = mid - (cdf_mid - q) / pdf_safe
+                mid = mid - (cdf_mid - q) / pdf_mid.clamp_min(2 * eps)
 
-                # Fall back to bisection where the Newton step leaves the bracket.
-                bisect_mid = (low + high) / 2
-                in_bracket = (newton_mid >= low - bracket_tol) & (newton_mid <= high + bracket_tol)
-                mid_new = torch.where(in_bracket, newton_mid.clamp(min=low, max=high), bisect_mid)
+                # Project back onto the support.
+                mid = mid.clamp(min=self.bound_low, max=self.bound_up)
 
-            else:
-                # Bisection step.
-                mid_new = (low + high) / 2
+        else:
+            # Root finding via bisection method.
+            low = torch.full_like(q, self.bound_low)
+            high = torch.full_like(q, self.bound_up)
 
-            # Update the bracket.
-            low = torch.where(cdf_mid < q, mid, low)
-            high = torch.where(cdf_mid >= q, mid, high)
-            mid = mid_new
+            for _ in range(num_iter):
+                cdf_mid = self.cdf(mid)
 
-        # Clamp to the support.
-        return mid.clamp(min=self.bound_low, max=self.bound_up)
+                # Early stop when all elements have converged.
+                if _has_converged(cdf_mid, q, eps, convergence_eps_factor):
+                    break
+
+                # Bisection step: update low or high based on whether cdf(mid) is less than or greater than q.
+                low = torch.where(cdf_mid < q, input=mid, other=low)
+                high = torch.where(cdf_mid >= q, input=mid, other=high)
+                mid = (low + high) / 2
+
+        return mid
 
     def rsample(self, sample_shape: torch.Size | list[int] | tuple[int, ...] = _size) -> torch.Tensor:
         """Draws reparameterized samples from the distribution, and allows gradients to flow backawards.
