@@ -5,7 +5,14 @@ from typing import Any
 import torch
 import torch.utils.benchmark as benchmark
 
-from binned_cdf import PiecewiseLinearBinnedCDF
+from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
+
+ResultsMap = dict[str, tuple[float, int]]
+
+
+def _short_name(cls_or_name: type | str) -> str:
+    name = cls_or_name if isinstance(cls_or_name, str) else cls_or_name.__name__
+    return name.replace("Piecewise", "PW").replace("BinnedCDF", "")
 
 
 def measure_performance(
@@ -61,65 +68,93 @@ def measure_performance(
     return median_time, total_mem
 
 
-def report_results(results: dict[str, tuple[float, int]]) -> None:
-    """Print the benchmarking results."""
-    print(f"{'operation':<16} | {'median time (ms)':<16} | {'total memory (MB)':<16}")
-    print("-" * 55)
-    for op, (median_time, total_mem) in results.items():
-        time_ms = median_time * 1000
-        mem_mb = total_mem / (1024**2)
-        print(f"{op:<16} | {time_ms:<16.4f} | {mem_mb:<16.4f}")
+def benchmark_class(
+    distr_class: type,
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    quantiles: torch.Tensor,
+    num_iter: int,
+) -> ResultsMap | None:
+    """Benchmarks a single distribution class. Returns None if the class fails (e.g. degree overflow)."""
+    try:
+        distr = distr_class(logits)
+        return {
+            "__init__": measure_performance(distr_class, logits, num_iter_measure=num_iter),
+            "prob": measure_performance(distr.prob, y, num_iter_measure=num_iter),
+            "cdf": measure_performance(distr.cdf, y, num_iter_measure=num_iter),
+            "icdf": measure_performance(distr.icdf, quantiles, num_iter_measure=num_iter),
+            "sample": measure_performance(distr.sample, num_iter_measure=num_iter),
+        }
+    except Exception as e:
+        print(f"  Skipping {distr_class.__name__}: {e}")
+        return None
 
 
-def benchmark_shape(distr_class: type, shape: tuple[int, ...], num_bins: int = 32, num_iter: int = 100) -> None:
-    """Benchmarks several function of the PiecewiseConstantBinnedCDF (sub)class for a specific logit shape.
+def report_results(all_results: dict[str, ResultsMap | None]) -> None:
+    """Print a comparison table with one column pair (time, memory) per class."""
+    class_names = list(all_results.keys())
+    operations = list(next(r for r in all_results.values() if r is not None).keys())
 
-    This function measures the average time and memory usage.
+    col_op, col_val = 10, 13
+
+    header = f"{'operation':<{col_op}}"
+    for name in class_names:
+        short = _short_name(name)
+        header += f" | {short + ' ms':<{col_val}} | {short + ' MB':<{col_val}}"
+    print(header)
+    print("-" * len(header))
+
+    for op in operations:
+        row = f"{op:<{col_op}}"
+        for name in class_names:
+            result = all_results[name]
+            if result is None:
+                row += f" | {'N/A':<{col_val}} | {'N/A':<{col_val}}"
+            else:
+                time_ms, total_mem = result[op]
+                row += f" | {time_ms * 1000:<{col_val}.4f} | {total_mem / (1024**2):<{col_val}.4f}"
+        print(row)
+
+
+def benchmark_shape(
+    distr_classes: list[type],
+    shape: tuple[int, ...],
+    num_iter: int = 100,
+) -> None:
+    """Benchmarks all given distribution classes for a specific logit shape and prints a comparison table.
 
     Args:
-        distr_class: The distribution class to benchmark: PiecewiseConstantBinnedCDF or PiecewiseLinearBinnedCDF.
-        shape: A tuple of integers defining the shape of the input logits tensor.
-        num_bins: The number of bins to use for the CDF.
-        num_iter: The number of iterations to run for estimating the timing results.
+        distr_classes: Distribution classes to benchmark.
+        shape: Shape of the input logits tensor (*batch_shape, num_bins).
+        num_iter: Number of iterations for timing measurements.
     """
     print(f"\n===== Benchmarking Shape {shape} =====")
-
-    # Generate prerequisites.
     logits = torch.randn(*shape)
     y = torch.randn(shape[:-1])
     quantiles = torch.rand_like(y)
-    distr = PiecewiseLinearBinnedCDF(logits)  # instantiate once for forward testing
 
-    # Run benchmarks.
-    results = {}
-    results["__init__"] = measure_performance(PiecewiseLinearBinnedCDF, logits, num_iter_measure=num_iter)
-    results["prob"] = measure_performance(distr.prob, y, num_iter_measure=num_iter)
-    results["cdf"] = measure_performance(distr.cdf, y, num_iter_measure=num_iter)
-    results["icdf"] = measure_performance(distr.icdf, quantiles, num_iter_measure=num_iter)
-    results["sample"] = measure_performance(distr.sample, num_iter_measure=num_iter)
-
-    # Report results.
-    report_results(results)
+    all_results = {cls.__name__: benchmark_class(cls, logits, y, quantiles, num_iter) for cls in distr_classes}
+    report_results(all_results)
 
 
 if __name__ == "__main__":
     """Execute the benchmark."""
-    # Force CPU execution
+    DISTR_CLASSES: list[type] = [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF, BezierCDF]
+
+    # Force CPU execution.
     torch.set_default_device("cpu")
     torch.set_default_dtype(torch.float32)
     print("Running benchmarks on CPU with float32.")
 
-    # Define use cases (batch Size, sequence length, etc.)
+    # Define use cases (batch size, sequence length, etc.)
     test_shapes = [
         (1, 128),  # single vector
         (10, 128),  # batch vector
+        (1, 4, 4),  # single mini image-like
+        (10, 4, 4),  # batch mini image-like
         (1, 512, 512),  # single image-like
         (10, 512, 512),  # batch image-like
     ]
-    distr_class = PiecewiseLinearBinnedCDF
 
     for shape in test_shapes:
-        try:
-            benchmark_shape(distr_class, shape)
-        except Exception as e:
-            print(f"Failed to benchmark shape {shape}: {e}\n")
+        benchmark_shape(DISTR_CLASSES, shape)

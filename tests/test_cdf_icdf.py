@@ -353,3 +353,39 @@ def test_icdf_fixed_quantiles(
         spacing_str = "log-spacing" if log_spacing else "linear-spacing"
         plt.suptitle(f"ICDF Test with Fixed Quantiles ({spacing_str})", fontsize=14)
         plt.savefig(results_dir / f"icdf_fixed_quantiles_{class_str}_{spacing_str}.png", bbox_inches="tight")
+
+
+@pytest.mark.parametrize("degree", [5, 20, 100])
+@pytest.mark.parametrize("batch_size", [None, 1, 8])
+def test_bezier_icdf_newton_bisection_consistency(degree: int, batch_size: int | None):
+    """Test that the Newton and bisection methods for ICDF yield consistent results."""
+    torch.manual_seed(42)
+    logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
+    distr = BezierCDF(logits, bound_low=-5, bound_up=5)
+
+    quantiles = torch.tensor([0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99])
+    if batch_size is not None:
+        quantiles = quantiles.unsqueeze(-1).expand(-1, batch_size)
+
+    icdf_newton = distr.icdf(quantiles, num_iter=10, use_newton=True)
+    icdf_bisection = distr.icdf(quantiles, num_iter=20, use_newton=False)
+
+    # Compare via round-trip cdf(icdf(q)) ≈ q, since in flat-CDF tail regions different x-values can
+    # map to nearly the same CDF value, making direct x-value comparison unreliable.
+    cdf_newton = distr.cdf(icdf_newton)
+    cdf_bisection = distr.cdf(icdf_bisection)
+
+    torch.testing.assert_close(
+        cdf_newton,
+        quantiles,
+        rtol=1e-3,
+        atol=1e-3,
+        msg="Newton round-trip cdf(icdf(q)) != q",
+    )
+    torch.testing.assert_close(
+        cdf_bisection,
+        quantiles,
+        rtol=1e-3,
+        atol=1e-3,
+        msg="Bisection round-trip cdf(icdf(q)) != q",
+    )
