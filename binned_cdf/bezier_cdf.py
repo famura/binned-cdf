@@ -135,14 +135,14 @@ class BezierCDF(Distribution):
 
             deltas = raw_deltas / sum_deltas  # shape: (*batch_shape, degree)
 
-            # log(sigmoid(x) / sum(sigmoid(x))) = logsigmoid(x) - log(sum(sigmoid(x)))
+            # log(Delta) = log(sigmoid(x) / sum(sigmoid(x))) = logsigmoid(x) - log(sum(sigmoid(x))).
             log_deltas = torch.nn.functional.logsigmoid(self.logits) - sum_deltas.log()
 
         else:
             raise ValueError(f"Unknown normalization method: {self.normalization_method}")
 
         # Pad with zeros and ones to enforce the CDF boundary conditions:
-        # betas = [0, beta_0, ..., beta_{n-2}, 1]
+        # betas = [0, beta_1, ..., beta_{n-1}, 1]
         zeros = torch.zeros(*deltas.shape[:-1], 1, device=deltas.device, dtype=deltas.dtype)  # shape: (*batch_shape, 1)
         inner_betas = torch.cumsum(deltas, dim=-1)[..., :-1]
         ones = torch.ones(*deltas.shape[:-1], 1, device=deltas.device, dtype=deltas.dtype)
@@ -451,16 +451,6 @@ class BezierCDF(Distribution):
             Quantiles in [bound_low, bound_up] corresponding to the input CDF values.
             Output shape: same as `value` argument.
         """
-
-        def _has_converged(cdf_mid: torch.Tensor, q: torch.Tensor, eps: float, convergence_eps_factor: float) -> bool:
-            """Check if all elements have converged based on the CDF values at the current midpoint.
-
-            We use the somewhat arbitrary criterion that the maximum absolute deviation across all elements is less than
-            `convergence_eps_factor` times machine epsilon.
-            """
-            abs_deviation = (cdf_mid - q).abs().max()
-            return bool(abs_deviation < convergence_eps_factor * eps)
-
         q = value.to(device=self.logits.device, dtype=self.logits.dtype)
         eps = torch.finfo(q.dtype).eps
 
@@ -476,7 +466,8 @@ class BezierCDF(Distribution):
             cdf_mid = self.cdf(mid)
 
             # Early stop when all elements have converged.
-            if _has_converged(cdf_mid, q, eps, convergence_eps_factor):
+            abs_deviation = (cdf_mid - q).abs().max()
+            if abs_deviation < convergence_eps_factor * eps:
                 break
 
             # Tighten the bracket based on CDF evaluation.
