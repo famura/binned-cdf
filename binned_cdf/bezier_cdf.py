@@ -30,6 +30,9 @@ class BezierCDF(Distribution):
         monotonicity, values in $[0, 1]$, non-negative PDF, and an unconstrained parameterization (any real-valued
         logits yield a valid distribution). No other polynomial basis offers all of these simultaneously. In practice,
         the bias matters less when logits are learned end-to-end via gradient descent, as the optimizer can compensate.
+
+        The sharpest peak a degree-n Bernstein polynomial can produce is a single Beta component with
+        $std \approx 1/(2\sqrt{n})$ in [0,1]-space. Scaled to support range R, the peak std is $R / (2\sqrt{n})$.
     """
 
     has_rsample = True

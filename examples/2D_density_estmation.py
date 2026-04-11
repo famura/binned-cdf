@@ -18,7 +18,12 @@ class DensityNet(torch.nn.Module):
     """Neural network for 2D density estimation using PiecewiseLinearBinnedCDF."""
 
     def __init__(
-        self, num_bins: int, distr_class: NewDistributionType, normalization_method: Literal["sigmoid", "softmax"]
+        self,
+        num_bins: int,
+        distr_class: NewDistributionType,
+        normalization_method: Literal["sigmoid", "softmax"],
+        bound_low: float,
+        bound_up: float,
     ) -> None:
         """Initialize the network.
 
@@ -27,11 +32,15 @@ class DensityNet(torch.nn.Module):
             distr_class: The distribution class to use for the output. One of the new distribution types introduced
                 in this package.
             normalization_method: Normalization method for the distribution ("sigmoid" or "softmax").
+            bound_low: Lower bound of the distribution support.
+            bound_up: Upper bound of the distribution support.
         """
         super().__init__()
         self.num_bins = num_bins
         self.distr_class = distr_class
         self.normalization_method: Literal["sigmoid", "softmax"] = normalization_method
+        self.bound_low = bound_low
+        self.bound_up = bound_up
         self.shared = torch.nn.Sequential(
             torch.nn.Linear(2, 128),
             torch.nn.ReLU(),
@@ -52,14 +61,18 @@ class DensityNet(torch.nn.Module):
         features = self.shared(x)
         logits = self.head(features)
         logits = logits.reshape(*logits.shape[:-1], 2, self.num_bins)
-        return self.distr_class(logits, bound_low=-2.0, bound_up=3.0, normalization_method=self.normalization_method)
+        return self.distr_class(
+            logits, bound_low=self.bound_low, bound_up=self.bound_up, normalization_method=self.normalization_method
+        )
 
 
 if __name__ == "__main__":
     """Main function to execute the density estimation example."""
     # Configure.
-    distr_class: NewDistributionType = BezierCDF
-    num_bins = 50 if distr_class == BezierCDF else 100
+    bound_low_2moons = -1.5  # prior knowledge about the dataset
+    bound_up_2moons = 2.5  # prior knowledge about the dataset
+    distr_class: NewDistributionType = PiecewiseLinearBinnedCDF
+    num_bins = 100
     normalization_method: Literal["softmax", "sigmoid"] = "softmax" if distr_class == BezierCDF else "sigmoid"
 
     # Create ground truth data.
@@ -72,11 +85,17 @@ if __name__ == "__main__":
     X = X.to(device)
 
     # Create the model and optimizer.
-    model = DensityNet(num_bins=num_bins, distr_class=distr_class, normalization_method=normalization_method)
+    model = DensityNet(
+        num_bins=num_bins,
+        distr_class=distr_class,
+        normalization_method=normalization_method,
+        bound_low=bound_low_2moons,
+        bound_up=bound_up_2moons,
+    )
     model = model.to(device)
-    lr = 5e-4 if distr_class == BezierCDF else 1e-4
+    lr = 1e-3 if distr_class == BezierCDF else 5e-5
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    num_iter = 5000 if distr_class == BezierCDF else 3000
+    num_iter = 6000
     num_grid_points = 200
     torch.manual_seed(0)
 
@@ -92,7 +111,10 @@ if __name__ == "__main__":
             print(f"Epoch {epoch + 1}/{num_iter}, Loss: {loss.item():.4f}")
     print("Training finished.")
 
-    xx, yy = np.meshgrid(np.linspace(-2, 3, num_grid_points), np.linspace(-1.5, 2, num_grid_points))
+    xx, yy = np.meshgrid(
+        np.linspace(bound_low_2moons, bound_up_2moons, num_grid_points),
+        np.linspace(bound_low_2moons, bound_up_2moons, num_grid_points),
+    )
     grid = torch.tensor(np.stack([xx.ravel(), yy.ravel()], axis=1), dtype=torch.float32).to(device)
 
     print("Gird evaluation started.")
