@@ -145,7 +145,7 @@ class BezierCDF(Distribution):
             raise ValueError(f"Unknown normalization method: {self.normalization_method}")
 
         # Pad with zeros and ones to enforce the CDF boundary conditions:
-        # betas = [0, beta_1, ..., beta_{n-1}, 1]
+        # betas = [0, beta_1, ..., beta_{n-1}, beta_n = 1]
         zeros = torch.zeros(*deltas.shape[:-1], 1, device=deltas.device, dtype=deltas.dtype)  # shape: (*batch_shape, 1)
         inner_betas = torch.cumsum(deltas, dim=-1)[..., :-1]
         ones = torch.ones(*deltas.shape[:-1], 1, device=deltas.device, dtype=deltas.dtype)
@@ -248,42 +248,43 @@ class BezierCDF(Distribution):
         weights: torch.Tensor,
         binom_coeffs: torch.Tensor,
     ) -> torch.Tensor:
-        r"""Evaluates the Bezier curve, i.e., a Bernstein polynomial, in the $T \in [0, 1]$ space.
+        r"""Evaluates a Bezier curve (a Bernstein polynomial) in the $T \in [0, 1]$ space.
 
-        This method computes the weighted sum of Bernstein basis polynomials, where each basis polynomial is defined as
+        This method computes the weighted sum of Bernstein basis polynomials. Let $d$ be the degree of the polynomial
+        being evaluated (either $n$ or $n+1$). Each basis polynomial is defined as:
 
-        $$ B_{i, n-1}(t) = \binom{n-1}{i} t^i (1-t)^{n-1-i} $$
+        $$ B_{i, d}(t) = \binom{d}{i} t^i (1-t)^{d-i} $$
 
-        where $n$ is the degree of the polynomial. The polynom's value $p(t)$ is computed as
+        The polynomial's value $p(t)$ is computed as:
 
-        $$ p(t) = \sum_{i=0}^{n-1} w_i B_{i, n-1}(t) $$
+        $$ p(t) = \sum_{i=0}^{d} w_i B_{i, d}(t) $$
 
-        where $w_i$ are the weights (either betas for CDF or deltas for PDF).
+        where $w_i$ are the weights (either betas for the CDF or deltas for the PDF).
 
         Args:
             t: Normalized input values in [0, 1].
                 Expected shape: (*sample_shape, *batch_shape).
-            weights: The coefficients for the basis polynomials (betas for CDF, deltas for PDF).
-                Expected shape: (*batch_shape, n + 1).
-            binom_coeffs: Precomputed binomial coefficients corresponding to the polynom's degree.
-                Expected shape: (n,).
+            weights: The coefficients for the basis polynomials.
+                Expected shape: (*batch_shape, d + 1).
+            binom_coeffs: Precomputed binomial coefficients corresponding to the polynomial's degree.
+                Expected shape: (d + 1,).
 
         Returns:
             The evaluated polynomial values.
             Output shape: (*sample_shape, *batch_shape)
         """
         # Get n which can be != self.degree as we use this method for both CDF and PDF which have different degrees.
-        n = binom_coeffs.shape[0]
+        nun_coeffs = binom_coeffs.shape[0]
 
         # Create a tensor of indices matching the number of basis polynomials.
-        i = torch.arange(n, device=t.device, dtype=t.dtype)
+        i = torch.arange(nun_coeffs, device=t.device, dtype=t.dtype)
 
         # Add an empty dimension to t for broadcasting, resulting in shape: (*sample_shape, *batch_shape, 1).
         t_expanded = t.unsqueeze(-1)
 
         # Compute the entire basis in one shot.
         # PyTorch broadcasts the shapes to shape (*sample_shape, *batch_shape, degree).
-        basis = binom_coeffs * (t_expanded**i) * ((1 - t_expanded) ** (n - 1 - i))
+        basis = binom_coeffs * (t_expanded**i) * ((1 - t_expanded) ** (nun_coeffs - 1 - i))
 
         # Multiply by weights and sum across the final dimension, resulting in shape (*sample_shape, *batch_shape).
         return torch.sum(weights * basis, dim=-1)
