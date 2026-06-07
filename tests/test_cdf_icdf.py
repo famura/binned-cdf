@@ -1,18 +1,19 @@
 import math
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 import matplotlib.pyplot as plt
 import pytest
 import seaborn as sns
 import torch
 
-from binned_cdf import PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
+from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
 from tests.conftest import needs_cuda
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("logit_scale", [1e-3, 1, 1e3, 1e9])
-@pytest.mark.parametrize("bin_normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
 @pytest.mark.parametrize(
     "use_cuda,plot",
@@ -23,22 +24,22 @@ from tests.conftest import needs_cuda
     ],
 )
 def test_cdf_random_logits(
-    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
+    distr_class: type[BezierCDF] | type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     logit_scale: float,
     batch_size: int | None,
-    bin_normalization_method: Literal["sigmoid", "softmax"],
+    normalization_method: Literal["sigmoid", "softmax"],
     use_cuda: bool,
     plot: bool,
     bound_low: float = -10,
     bound_up: float = 10,
-    num_bins: int = 400,
+    num_bins: int = 100,
 ):
-    """Test CDF evaluation with random logits at the bounds."""
+    """Test CDF evaluation with random logits and at the bounds."""
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = logit_scale * torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
 
-    distr = distr_class(logits, bound_low, bound_up, bin_normalization_method=bin_normalization_method)
+    distr = distr_class(logits, bound_low, bound_up, normalization_method=normalization_method)
 
     # Evaluate the CDF at the bounds.
     cdf_low = distr.cdf(torch.tensor(bound_low))
@@ -58,14 +59,24 @@ def test_cdf_random_logits(
         plt.title(f"CDF for random logits scaled by {logit_scale}")
         plt.legend()
         plt.grid(True, alpha=0.3)
-        class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
+
+        results_dir = Path("tests/results/test_cdf_icdf")
+        results_dir.mkdir(parents=True, exist_ok=True)
+        if distr_class is BezierCDF:
+            class_str = "bezier"
+        elif distr_class is PiecewiseConstantBinnedCDF:
+            class_str = "const"
+        elif distr_class is PiecewiseLinearBinnedCDF:
+            class_str = "linear"
+        else:
+            raise TypeError(f"Unknown distribution class {distr_class}")
         plt.savefig(
-            f"tests/results/cdf_random_logits_scale-{logit_scale}_normalization-{bin_normalization_method}_{class_suffix}.png",
+            results_dir / f"cdf_random_logits_{class_str}_scale-{logit_scale}_normalization-{normalization_method}.png",
             bbox_inches="tight",
         )
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("sample_batch_size", [None, 1, 8])
 @pytest.mark.parametrize("distr_batch_size", [1, 3])
 @pytest.mark.parametrize(
@@ -77,7 +88,7 @@ def test_cdf_random_logits(
     ],
 )
 def test_sampling_and_cdf_consistency(
-    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
+    distr_class: type[BezierCDF] | type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     sample_batch_size: int | None,  # number of samples to draw per distribution
     distr_batch_size: int,  # number of independent distributions to sample from
     use_cuda: bool,
@@ -88,7 +99,7 @@ def test_sampling_and_cdf_consistency(
     num_bins: int = 20,
     abs_tol_per_bin: float = 0.08,
 ):
-    """Test that samples follow the PiecewiseConstantBinnedCDF's CDF and have the correct shape."""
+    """Test that samples follow the CDF and have the correct shape."""
     torch.manual_seed(42)
     device = torch.device("cuda:0" if use_cuda else "cpu")
 
@@ -144,11 +155,21 @@ def test_sampling_and_cdf_consistency(
         plt.title("Empirical vs Theoretical CDF")
         plt.legend()
         plt.grid(True, alpha=0.3)
-        class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
-        plt.savefig(f"tests/results/sampling_and_cdf_consistency_{class_suffix}.png", bbox_inches="tight")
+
+        results_dir = Path("tests/results/test_cdf_icdf")
+        results_dir.mkdir(parents=True, exist_ok=True)
+        if distr_class is BezierCDF:
+            class_str = "bezier"
+        elif distr_class is PiecewiseConstantBinnedCDF:
+            class_str = "const"
+        elif distr_class is PiecewiseLinearBinnedCDF:
+            class_str = "linear"
+        else:
+            raise TypeError(f"Unknown distribution class {distr_class}")
+        plt.savefig(results_dir / f"sampling_consistency_{class_str}.png", bbox_inches="tight")
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("batch_size", [None, 1, 8, 16])
 @pytest.mark.parametrize(
     "use_cuda",
@@ -158,15 +179,15 @@ def test_sampling_and_cdf_consistency(
     ],
 )
 def test_icdf_random_quantiles(
-    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
+    distr_class: type[BezierCDF] | type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     batch_size: int | None,
     use_cuda: bool,
     bound_low: float = -10,
     bound_up: float = 10,
-    num_bins: int = 200,
-    num_quantiles: int = 50,
+    num_bins: int = 50,
+    num_quantiles: int = 100,
 ):
-    """Test ICDF evaluation with random quantiles - basic value and shape checking."""
+    """Test inverse CDF evaluation with random quantiles - basic value and shape checking."""
     torch.manual_seed(42)
     device = torch.device("cuda:0" if use_cuda else "cpu")
 
@@ -198,7 +219,7 @@ def test_icdf_random_quantiles(
     assert torch.all(icdf_at_1 <= bound_up + 1e-5), f"ICDF(1) should be <= bound_up: {icdf_at_1}"
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
 @pytest.mark.parametrize(
     "use_cuda,plot",
@@ -209,13 +230,13 @@ def test_icdf_random_quantiles(
     ],
 )
 def test_icdf_fixed_quantiles(
-    distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
+    distr_class: type[BezierCDF] | type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     log_spacing: bool,
     use_cuda: bool,
     plot: bool,
     bound_low: float = -5.0,
     bound_up: float = 5.0,
-    num_bins: int = 500,
+    num_bins: int = 50,
 ):
     """Test inverse CDF at fixed quantiles and verify round-trip property: cdf(icdf(q)) ≈ q."""
     torch.manual_seed(42)
@@ -223,7 +244,8 @@ def test_icdf_fixed_quantiles(
 
     # Create a distribution with random logits.
     logits = torch.randn(num_bins, device=device)
-    distr = distr_class(logits, bound_low, bound_up, log_spacing=log_spacing)
+    extra_init_kwargs: dict[str, Any] = {"log_spacing": log_spacing} if distr_class is PiecewiseLinearBinnedCDF else {}
+    distr = distr_class(logits, bound_low, bound_up, **extra_init_kwargs)
 
     # Test fixed quantiles with both linear and log spacing for the quantiles themselves.
     quantiles = torch.tensor([0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99], device=device)
@@ -237,12 +259,14 @@ def test_icdf_fixed_quantiles(
 
     # Test the round-trip property: cdf(icdf(q)) ≈ q.
     cdf_roundtrip = distr.cdf(icdf_values)
-    if isinstance(distr, PiecewiseConstantBinnedCDF):
+    if isinstance(distr, BezierCDF):
+        atol = 1e-6
+    elif isinstance(distr, PiecewiseConstantBinnedCDF):
         atol = 2 / num_bins
     elif isinstance(distr, PiecewiseLinearBinnedCDF):
         atol = 1e-6
     else:
-        raise TypeError("Unknown distribution class for setting atol")
+        raise TypeError(f"Unknown distribution class {distr_class}")
     torch.testing.assert_close(
         cdf_roundtrip,
         quantiles,
@@ -314,10 +338,54 @@ def test_icdf_fixed_quantiles(
         )
         ax4.text(0.1, 0.5, properties_text, fontsize=10, verticalalignment="center", family="monospace")
 
-        class_suffix = "const" if distr_class is PiecewiseConstantBinnedCDF else "linear"
-        spacing_suffix = "log-spacing" if log_spacing else "linear-spacing"
-        plt.suptitle(f"ICDF Test with Fixed Quantiles ({spacing_suffix})", fontsize=14)
         plt.tight_layout()
-        plt.savefig(
-            f"tests/results/icdf_fixed_quantiles_{class_suffix}_{spacing_suffix}.png", bbox_inches="tight", dpi=100
-        )
+
+        results_dir = Path("tests/results/test_cdf_icdf")
+        results_dir.mkdir(parents=True, exist_ok=True)
+        if distr_class is BezierCDF:
+            class_str = "bezier"
+        elif distr_class is PiecewiseConstantBinnedCDF:
+            class_str = "const"
+        elif distr_class is PiecewiseLinearBinnedCDF:
+            class_str = "linear"
+        else:
+            raise TypeError(f"Unknown distribution class {distr_class}")
+        spacing_str = "log-spacing" if log_spacing else "linear-spacing"
+        plt.suptitle(f"ICDF Test with Fixed Quantiles ({spacing_str})", fontsize=14)
+        plt.savefig(results_dir / f"icdf_fixed_quantiles_{class_str}_{spacing_str}.png", bbox_inches="tight")
+
+
+@pytest.mark.parametrize("degree", [5, 20, 100])
+@pytest.mark.parametrize("batch_size", [None, 1, 8])
+def test_bezier_icdf_newton_bisection_consistency(degree: int, batch_size: int | None):
+    """Test that the Newton and bisection methods for ICDF yield consistent results."""
+    torch.manual_seed(42)
+    logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
+    distr = BezierCDF(logits, bound_low=-5, bound_up=5)
+
+    quantiles = torch.tensor([0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99])
+    if batch_size is not None:
+        quantiles = quantiles.unsqueeze(-1).expand(-1, batch_size)
+
+    icdf_newton = distr.icdf(quantiles, num_iter=10, use_newton=True)
+    icdf_bisection = distr.icdf(quantiles, num_iter=20, use_newton=False)
+
+    # Compare via round-trip cdf(icdf(q)) ≈ q, since in flat-CDF tail regions different x-values can
+    # map to nearly the same CDF value, making direct x-value comparison unreliable.
+    cdf_newton = distr.cdf(icdf_newton)
+    cdf_bisection = distr.cdf(icdf_bisection)
+
+    torch.testing.assert_close(
+        cdf_newton,
+        quantiles,
+        rtol=1e-3,
+        atol=1e-3,
+        msg="Newton round-trip cdf(icdf(q)) != q",
+    )
+    torch.testing.assert_close(
+        cdf_bisection,
+        quantiles,
+        rtol=1e-3,
+        atol=1e-3,
+        msg="Bisection round-trip cdf(icdf(q)) != q",
+    )

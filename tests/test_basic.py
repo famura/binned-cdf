@@ -1,19 +1,18 @@
 import math
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pytest
 import torch
+from torch.distributions import constraints
 
-from binned_cdf import PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
+from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
 from tests.conftest import needs_cuda
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
-@pytest.mark.parametrize("num_bins", [1, 2, 7, 1000])  # 2 is an edge case for log-spacing
-@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
-@pytest.mark.parametrize("bin_normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("degree", [1, 2, 7, 1000])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
 @pytest.mark.parametrize("bound_low,bound_up", [(-5, 5), (0, 5), (-5, 0)])
 @pytest.mark.parametrize(
     "use_cuda",
@@ -22,12 +21,73 @@ from tests.conftest import needs_cuda
         pytest.param(True, marks=needs_cuda, id="cuda"),
     ],
 )
-def test_basic_properties(
+def test_basic_properties_bezier(
+    batch_size: int | None,
+    degree: int,
+    normalization_method: Literal["sigmoid", "softmax"],
+    bound_low: int,
+    bound_up: int,
+    use_cuda: bool,
+):
+    """Test basic properties of the BezierCDF."""
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
+    logits = logits.to(device)
+
+    if degree < 1000:
+        distr = BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
+    else:
+        with pytest.raises(ValueError, match="Binomial coefficients became infinite for degree"):
+            BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
+        return
+
+    # Test that tensors are on the correct device.
+    assert distr.logits.device == device
+
+    # Test properties directly coming from the arguments.
+    assert distr.bound_low == bound_low
+    assert distr.bound_up == bound_up
+    assert distr.support.lower_bound == bound_low
+    assert distr.support.upper_bound == bound_up
+    assert distr.arg_constraints == {"logits": constraints.real}
+    assert distr.batch_shape == torch.Size([]) if batch_size is None else torch.Size([batch_size])
+    assert distr.event_shape == torch.Size([])
+
+    # Test basic string representation.
+    repr_str = repr(distr)
+    assert BezierCDF.__name__ in repr_str
+
+    # Test that mean and variance have the correct shape and are finite.
+    mean = distr.mean
+    var = distr.variance
+    assert mean.device == device
+    assert var.device == device
+    assert mean.shape == distr.batch_shape
+    assert var.shape == distr.batch_shape
+    assert torch.all(torch.isfinite(mean))
+    assert torch.all(var >= 0)
+    assert torch.all(torch.isfinite(var))
+
+
+@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("batch_size", [None, 1, 8])
+@pytest.mark.parametrize("num_bins", [1, 2, 7, 1000])  # 2 is an edge case for log-spacing
+@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("bound_low,bound_up", [(-5, 5), (0, 5), (-5, 0)])
+@pytest.mark.parametrize(
+    "use_cuda",
+    [
+        pytest.param(False, id="cpu"),
+        pytest.param(True, marks=needs_cuda, id="cuda"),
+    ],
+)
+def test_basic_properties_binned(
     distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     batch_size: int | None,
     num_bins: int,
     log_spacing: bool,
-    bin_normalization_method: Literal["sigmoid", "softmax"],
+    normalization_method: Literal["sigmoid", "softmax"],
     bound_low: int,
     bound_up: int,
     use_cuda: bool,
@@ -39,25 +99,17 @@ def test_basic_properties(
 
     if log_spacing and not math.isclose(-bound_low, bound_up):
         with pytest.raises(ValueError, match="log_spacing requires symmetric bounds"):
-            distr_class(
-                logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
-            )
+            distr_class(logits, bound_low, bound_up, log_spacing=log_spacing, normalization_method=normalization_method)
         return
     if log_spacing and bound_up <= 0:
         with pytest.raises(ValueError, match="log_spacing requires positive upper bound"):
-            distr_class(
-                logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
-            )
+            distr_class(logits, bound_low, bound_up, log_spacing=log_spacing, normalization_method=normalization_method)
         return
     if log_spacing and num_bins % 2 != 0:
         with pytest.raises(ValueError, match="log_spacing requires even number of bins"):
-            distr_class(
-                logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
-            )
+            distr_class(logits, bound_low, bound_up, log_spacing=log_spacing, normalization_method=normalization_method)
         return
-    distr = distr_class(
-        logits, bound_low, bound_up, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method
-    )
+    distr = distr_class(logits, bound_low, bound_up, log_spacing=log_spacing, normalization_method=normalization_method)
 
     # Test that tensors are on the correct device.
     assert distr.logits.device == device
@@ -71,7 +123,7 @@ def test_basic_properties(
     assert distr.bound_up == bound_up
     assert distr.support.lower_bound == bound_low
     assert distr.support.upper_bound == bound_up
-    assert distr.arg_constraints == {}  # we never had any constraints
+    assert distr.arg_constraints == {"logits": constraints.real}
     assert distr.batch_shape == torch.Size([]) if batch_size is None else torch.Size([batch_size])
     assert distr.event_shape == torch.Size([])
 
@@ -169,11 +221,10 @@ def test_expand(
     assert expanded_dist.bin_widths.shape == distr.bin_widths.shape, "bin_widths shape should be unchanged"
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
-@pytest.mark.parametrize("num_bins", [2, 200])  # 2 is an edge case for log-spacing
-@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
-@pytest.mark.parametrize("bin_normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("degree", [2, 50])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("bound_low,bound_up", [(-5, 5), (0, 5), (-5, 0)])
 @pytest.mark.parametrize(
     "use_cuda",
     [
@@ -181,12 +232,64 @@ def test_expand(
         pytest.param(True, marks=needs_cuda, id="cuda"),
     ],
 )
-def test_prob_random_logits(
+def test_prob_random_logits_bezier(
+    batch_size: int | None,
+    degree: int,
+    normalization_method: Literal["sigmoid", "softmax"],
+    bound_low: int,
+    bound_up: int,
+    use_cuda: bool,
+):
+    """Test probability evaluation with random logits for BezierCDF."""
+    torch.manual_seed(42)
+
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
+    logits = logits.to(device)
+    distr = BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
+
+    # Evaluate at evenly-spaced interior points (excluding bounds to avoid boundary edge cases).
+    num_eval = degree
+    eval_points = torch.linspace(bound_low, bound_up, num_eval + 2, device=device)[1:-1]  # shape: (num_eval,)
+    if batch_size is not None:
+        eval_points = eval_points.unsqueeze(1).expand(num_eval, batch_size)
+        expected_probs_shape: tuple[int, ...] = (num_eval, batch_size)
+    else:
+        expected_probs_shape: tuple[int, ...] = (num_eval,)  # type: ignore[no-redef]
+
+    probs_at_points = distr.log_prob(eval_points)
+    assert probs_at_points.device == device
+    assert torch.all(torch.isfinite(probs_at_points)), "log_prob at interior points should be finite"
+    assert probs_at_points.shape == expected_probs_shape
+
+    # Test probability at bounds - should be finite.
+    expected_scalar_shape = torch.Size([]) if batch_size is None else torch.Size([batch_size])
+    prob_at_low = distr.log_prob(torch.tensor(distr.bound_low, device=device))
+    prob_at_up = distr.log_prob(torch.tensor(distr.bound_up, device=device))
+    assert torch.all(torch.isfinite(prob_at_low)), f"log_prob at lower bound should be finite: {prob_at_low}"
+    assert torch.all(torch.isfinite(prob_at_up)), f"log_prob at upper bound should be finite: {prob_at_up}"
+    assert prob_at_low.shape == expected_scalar_shape
+    assert prob_at_up.shape == expected_scalar_shape
+
+
+@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("batch_size", [None, 1, 8])
+@pytest.mark.parametrize("num_bins", [2, 200])  # 2 is an edge case for log-spacing
+@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize(
+    "use_cuda",
+    [
+        pytest.param(False, id="cpu"),
+        pytest.param(True, marks=needs_cuda, id="cuda"),
+    ],
+)
+def test_prob_random_logits_binned(
     distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     batch_size: int | None,
     num_bins: int,
     log_spacing: bool,
-    bin_normalization_method: Literal["sigmoid", "softmax"],
+    normalization_method: Literal["sigmoid", "softmax"],
     use_cuda: bool,
 ):
     """Test probability evaluation with random logits at the bounds."""
@@ -195,7 +298,7 @@ def test_prob_random_logits(
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
-    distr = distr_class(logits, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method)
+    distr = distr_class(logits, log_spacing=log_spacing, normalization_method=normalization_method)
 
     # Define expected shapes based on batch_size. The bins go into the sample shape.
     bin_centers = distr.bin_centers
@@ -223,11 +326,10 @@ def test_prob_random_logits(
     assert prob_at_up.shape == expected_scalar_shape
 
 
-@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
-@pytest.mark.parametrize("num_bins", [2, 200])  # 2 is an edge case for log-spacing
-@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
-@pytest.mark.parametrize("bin_normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("degree", [2, 50])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize("bound_low,bound_up", [(-5, 5), (0, 5), (-5, 0)])
 @pytest.mark.parametrize(
     "use_cuda",
     [
@@ -235,21 +337,86 @@ def test_prob_random_logits(
         pytest.param(True, marks=needs_cuda, id="cuda"),
     ],
 )
-def test_prob(
+def test_prob_bezier(
+    batch_size: int | None,
+    degree: int,
+    normalization_method: Literal["sigmoid", "softmax"],
+    bound_low: int,
+    bound_up: int,
+    use_cuda: bool,
+):
+    """Test prob() returns valid densities and is consistent with log_prob() for BezierCDF."""
+    torch.manual_seed(42)
+
+    device = torch.device("cuda:0" if use_cuda else "cpu")
+    logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
+    logits = logits.to(device)
+    distr = BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
+
+    # Evaluate at evenly-spaced interior points (excluding bounds to avoid boundary edge cases).
+    num_eval = degree
+    eval_points = torch.linspace(bound_low, bound_up, num_eval + 2, device=device)[1:-1]  # shape: (num_eval,)
+    if batch_size is not None:
+        eval_points = eval_points.unsqueeze(1).expand(num_eval, batch_size)
+        expected_shape: tuple[int, ...] = (num_eval, batch_size)
+    else:
+        expected_shape: tuple[int, ...] = (num_eval,)  # type: ignore[no-redef]
+
+    prob_vals = distr.prob(eval_points)
+    assert prob_vals.device == device
+    assert prob_vals.shape == expected_shape
+    assert torch.all(prob_vals >= 0), "prob() must be non-negative"
+    assert torch.all(torch.isfinite(prob_vals)), "prob() at interior points should be finite"
+
+    # prob() and log_prob() must be consistent: prob == exp(log_prob).
+    log_prob_vals = distr.log_prob(eval_points)
+    assert torch.allclose(prob_vals, torch.exp(log_prob_vals), atol=1e-5), "prob() and exp(log_prob()) should match"
+
+    # Evaluate at the bounds.
+    expected_scalar_shape = torch.Size([]) if batch_size is None else torch.Size([batch_size])
+    prob_at_low = distr.prob(torch.tensor(distr.bound_low, device=device))
+    prob_at_up = distr.prob(torch.tensor(distr.bound_up, device=device))
+    assert prob_at_low.shape == expected_scalar_shape
+    assert prob_at_up.shape == expected_scalar_shape
+    assert torch.all(prob_at_low >= 0)
+    assert torch.all(prob_at_up >= 0)
+    assert torch.all(torch.isfinite(prob_at_low))
+    assert torch.all(torch.isfinite(prob_at_up))
+
+    # Consistency at bounds too.
+    log_prob_at_low = distr.log_prob(torch.tensor(distr.bound_low, device=device))
+    log_prob_at_up = distr.log_prob(torch.tensor(distr.bound_up, device=device))
+    assert torch.allclose(prob_at_low, torch.exp(log_prob_at_low), atol=1e-5)
+    assert torch.allclose(prob_at_up, torch.exp(log_prob_at_up), atol=1e-5)
+
+
+@pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize("batch_size", [None, 1, 8])
+@pytest.mark.parametrize("num_bins", [2, 200])  # 2 is an edge case for log-spacing
+@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
+@pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
+@pytest.mark.parametrize(
+    "use_cuda",
+    [
+        pytest.param(False, id="cpu"),
+        pytest.param(True, marks=needs_cuda, id="cuda"),
+    ],
+)
+def test_prob_binned(
     distr_class: type[PiecewiseConstantBinnedCDF] | type[PiecewiseLinearBinnedCDF],
     batch_size: int | None,
     num_bins: int,
     log_spacing: bool,
-    bin_normalization_method: Literal["sigmoid", "softmax"],
+    normalization_method: Literal["sigmoid", "softmax"],
     use_cuda: bool,
 ):
-    """Test prob() returns valid densities and is consistent with log_prob()."""
+    """Test prob() returns valid densities and is consistent with log_prob() for binned distributions."""
     torch.manual_seed(42)
 
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
-    distr = distr_class(logits, log_spacing=log_spacing, bin_normalization_method=bin_normalization_method)
+    distr = distr_class(logits, log_spacing=log_spacing, normalization_method=normalization_method)
 
     # Evaluate at bin centers.
     bin_centers = distr.bin_centers
@@ -389,60 +556,105 @@ def test_shannon_entropy(
         ),
     ],
 )
-@pytest.mark.parametrize("log_spacing", [False, True], ids=["linear_spacing", "log_spacing"])
+@pytest.mark.parametrize(
+    "distr_class,log_spacing,num_bins",
+    [
+        pytest.param(BezierCDF, None, 95, id="BezierCDF"),
+        pytest.param(PiecewiseLinearBinnedCDF, False, 10, id="PiecewiseLinearBinnedCDF-linear_spacing"),
+        pytest.param(PiecewiseLinearBinnedCDF, True, 40, id="PiecewiseLinearBinnedCDF-log_spacing"),
+    ],
+)
 def test_differential_entropy(
     target_dist_params: dict,
-    log_spacing: bool,
-    num_bins: int = 200,
+    distr_class: type[BezierCDF] | type[PiecewiseLinearBinnedCDF],
+    log_spacing: bool | None,
+    num_bins: int,
 ):
     """Test differential entropy computation against theoretical values from known distributions."""
     torch.manual_seed(42)
     np.random.seed(42)
 
     # Extract parameters from the parametrized input.
-    dist_class = target_dist_params["dist"]
-    dist_params = target_dist_params["params"]
+    target_distr_class = target_dist_params["dist"]
+    target_distr_params = target_dist_params["params"]
     bound_low, bound_up = target_dist_params["bounds"]
     rel_tol = target_dist_params["rel_tol"]
 
     # Create target distribution, and get the entropy.
-    target_distr = dist_class(**dist_params)
+    target_distr = target_distr_class(**target_distr_params)
     target_entropy = target_distr.entropy().item()
 
-    # Use the PiecewiseLinearBinnedCDF's own bin construction to ensure matching shapes between distributions.
-    _, bin_centers, bin_widths = PiecewiseLinearBinnedCDF._create_bins(
-        num_bins=num_bins,
-        bound_low=bound_low,
-        bound_up=bound_up,
-        log_spacing=log_spacing,
-        device=torch.device("cpu"),
-        dtype=torch.float32,
-    )
+    if distr_class is BezierCDF:
+        # BezierCDF uses evenly-spaced evaluation points and log-probabilities as logits.
+        eval_points = torch.linspace(bound_low, bound_up, num_bins)
+        target_probs = torch.exp(target_distr.log_prob(eval_points))
+        logits = torch.log(target_probs + 1e-8)
+        dist = BezierCDF(logits=logits.unsqueeze(0), bound_low=bound_low, bound_up=bound_up)
+    elif distr_class is PiecewiseLinearBinnedCDF:
+        # Use the distr_class's own bin construction to ensure matching shapes between distributions.
+        assert log_spacing is not None, "log_spacing must be specified for PiecewiseLinearBinnedCDF"
+        _, bin_centers, bin_widths = PiecewiseLinearBinnedCDF._create_bins(
+            num_bins=num_bins,
+            bound_low=bound_low,
+            bound_up=bound_up,
+            log_spacing=log_spacing,
+            device=torch.device("cpu"),
+            dtype=torch.float32,
+        )
 
-    # Compute target probabilities at bin centers, and normalize to get probability masses for each bin.
-    target_probs = torch.exp(target_distr.log_prob(bin_centers))
-    target_prob_masses = target_probs * bin_widths
-    target_prob_masses = target_prob_masses / target_prob_masses.sum()
+        # Compute target probabilities at bin centers, and normalize to get probability masses for each bin.
+        target_probs = torch.exp(target_distr.log_prob(bin_centers))
+        target_prob_masses = target_probs * bin_widths
+        target_prob_masses = target_prob_masses / target_prob_masses.sum()
 
-    # Convert probabilities to logits (inverse sigmoid).
-    eps = 1e-8
-    target_prob_masses = torch.clamp(target_prob_masses, eps, 1 - eps)
-    logits = torch.log(target_prob_masses / (1 - target_prob_masses))
+        # Convert probabilities to logits (inverse sigmoid).
+        eps = 1e-8
+        target_prob_masses = torch.clamp(target_prob_masses, eps, 1 - eps)
+        logits = torch.log(target_prob_masses / (1 - target_prob_masses))
 
-    # Create PiecewiseLinearBinnedCDF distribution, and compute reconstructed entropy.
-    dist = PiecewiseLinearBinnedCDF(
-        logits=logits.unsqueeze(0),
-        bound_low=bound_low,
-        bound_up=bound_up,
-        log_spacing=log_spacing,
-    )
+        dist = PiecewiseLinearBinnedCDF(
+            logits=logits.unsqueeze(0),
+            bound_low=bound_low,
+            bound_up=bound_up,
+            log_spacing=log_spacing,
+        )
+
+    else:
+        raise NotImplementedError(f"Unsupported distribution class: {distr_class}")
+
     reconstructed_entropy = dist.entropy().item()
 
     # Check that reconstructed entropy is close to theoretical value.
+    # BezierCDF has higher approximation error due to O(1/n) Bernstein polynomial convergence.
+    effective_rel_tol = 0.10 if distr_class is BezierCDF else rel_tol
     torch.testing.assert_close(
         reconstructed_entropy,
         target_entropy,
-        rtol=rel_tol,
+        rtol=effective_rel_tol,
         atol=1e-6,
         msg=f"Entropy mismatch: reconstructed={reconstructed_entropy:.6f}, theoretical={target_entropy:.6f}",
     )
+
+
+@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseLinearBinnedCDF])
+def test_differential_entropy_batched_smoke(
+    distr_class: type[BezierCDF] | type[PiecewiseLinearBinnedCDF],
+    batch_size: int = 4,
+    num_bins: int = 20,
+    bound_low: float = -5.0,
+    bound_up: float = 5.0,
+):
+    """Smoke test for differential entropy computation in batched distributions."""
+    # Create random logits for a batched distribution.
+    logits = torch.randn(batch_size, num_bins)
+
+    # Create the distribution.
+    extra_init_kwargs: dict[str, Any] = {"log_spacing": True} if distr_class is PiecewiseLinearBinnedCDF else {}
+    dist = distr_class(logits, bound_low, bound_up, **extra_init_kwargs)
+
+    # Compute the differential entropy for the batch.
+    entropy = dist.entropy()
+
+    # Check that the output has the correct shape and is finite.
+    assert entropy.shape == (batch_size,), f"Expected entropy shape {(batch_size,)}, got {entropy.shape}"
+    assert torch.all(torch.isfinite(entropy)), "Entropy values should be finite"

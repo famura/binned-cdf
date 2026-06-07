@@ -145,6 +145,7 @@ ignore = [
   "CPY001", # missing copyright notice at the top of the file
   "D100", # missing docstring in public module
   "D104", # missing docstring in public package
+  "D205", # 1 blank line required between summary line and description
   "PLR", # pylint refactor
 ]
 preview = true

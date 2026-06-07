@@ -13,12 +13,15 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
 
     @property
     def variance(self) -> torch.Tensor:
-        """Compute variance of the distribution, of shape (*batch_shape,).
+        """Compute variance of the distribution.
 
         Note:
             Since the distribution is piecewise linear, the variance includes both the discrete variance from the
             bin probabilities and the intra-bin variance due to linear interpolation called Sheppard's correction,
             which assumes that probabilities are uniformly distributed within each bin.
+
+        Returns:
+            Tensor of shape (*batch_shape,).
         """
         discrete_var = super().variance
         intra_bin_var = torch.sum(self.bin_probs * (self.bin_widths**2) / 12.0, dim=-1)  # Sheppard's correction
@@ -28,11 +31,11 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
         """Compute the log-probability density at given values.
 
         Args:
-            value: Values at which to compute the log PDF.
+            value: Values at which to compute the log-PDF.
                 Expected shape: (*sample_shape, *batch_shape) or broadcastable to it.
 
         Returns:
-            Log PDF values corresponding to the input values.
+            Log-PDF values corresponding to the input values.
             Output shape: same as `value` shape after broadcasting, i.e., (*sample_shape, *batch_shape).
         """
         value_prep, num_sample_dims = self._prepare_input(value)
@@ -171,6 +174,9 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
 
         Note:
             Here, we are doing an approximation by treating each bin as a uniform distribution over its width.
+
+        Returns:
+            Tensor of shape (*batch_shape,).
         """
         bin_probs = self.bin_probs
 
