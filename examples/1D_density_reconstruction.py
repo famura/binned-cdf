@@ -67,7 +67,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Fit a 1D density using BezierCDF and compare with the target distribution."
     )
-    parser.add_argument("--num-iter", type=int, default=1000)
+    parser.add_argument("--num-iter", type=int, default=500)
     parser.add_argument("--degree", type=int, default=32)
     parser.add_argument("--grid-points", type=int, default=2001)
     parser.add_argument("--learning-rate", type=float, default=0.05)
@@ -149,7 +149,7 @@ if __name__ == "__main__":
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     fig.savefig(args.output, dpi=300, bbox_inches="tight")
-    print(f"Plot saved to {args.output}", flush=True)
+    print(f"Plot saved to {args.output}")
     if args.show:
         plt.show()
     plt.close(fig)

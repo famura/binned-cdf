@@ -180,7 +180,7 @@ if __name__ == "__main__":
     fig.tight_layout()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.output, dpi=300, bbox_inches="tight")
-    print(f"Plot saved to {args.output}", flush=True)
+    print(f"Plot saved to {args.output}")
     if args.show:
         plt.show()
     plt.close(fig)
