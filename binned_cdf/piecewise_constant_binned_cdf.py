@@ -258,11 +258,11 @@ class PiecewiseConstantBinnedCDF(Distribution):
         # index where value would be inserted to maintain sorted order.
         if bin_edges is not None:
             # Since bins are defined as [edge[i], edge[i + 1]), we subtract 1 to get the bin index.
-            bin_indices = torch.searchsorted(bin_edges, value, right=True) - 1
+            bin_idcs = torch.searchsorted(bin_edges, value, right=True) - 1
         elif bin_centers is not None:
             # If value < first center, returns 0 -> gets 0.0 from cumsum_probs
             # If value >= last center, returns num_bins -> gets 1.0 from cumsum_probs
-            bin_indices = torch.searchsorted(bin_centers, value, right=True)
+            bin_idcs = torch.searchsorted(bin_centers, value, right=True)
         else:
             raise ValueError("Either edges or centers must be provided to determine bin indices.")
 
@@ -270,21 +270,21 @@ class PiecewiseConstantBinnedCDF(Distribution):
         # - values below bound_low would give bin_idx = -1
         # - values at bound_up would give bin_idx = num_bins
         if bin_edges is not None:
-            bin_indices = torch.clamp(bin_indices, 0, self.num_bins - 1)
+            bin_idcs = torch.clamp(bin_idcs, 0, self.num_bins - 1)
         elif bin_centers is not None:
-            bin_indices = torch.clamp(bin_indices, 0, self.num_bins)
+            bin_idcs = torch.clamp(bin_idcs, 0, self.num_bins)
 
-        return bin_indices
+        return bin_idcs
 
     def _gather_from_bins(
-        self, params: torch.Tensor, bin_indices: torch.Tensor, num_sample_dims: int, target_shape: torch.Size
+        self, params: torch.Tensor, bin_idcs: torch.Tensor, num_sample_dims: int, target_shape: torch.Size
     ) -> torch.Tensor:
         """Gather bin-specific parameters using aligned indices.
 
         Args:
             params: Tensor used as the input to gather from, of shape (*batch_shape, num_bins) or
                 (*batch_shape, num_bins + 1).
-            bin_indices: Indices used to gather by, of shape (*sample_shape, *batch_shape).
+            bin_idcs: Indices used to gather by, of shape (*sample_shape, *batch_shape).
             num_sample_dims: Number of leading sample dimensions in the input.
             target_shape: The shape to expand to, (*sample_shape, *batch_shape).
 
@@ -300,9 +300,9 @@ class PiecewiseConstantBinnedCDF(Distribution):
         # Gather along the last dimension. The index must be unsqueezed if indices doesn't have the bin dim yet.
         # Use gather with automatic broadcasting. unsqueeze(-1) provides the index dimension,
         # and squeeze(-1) removes it from the result.
-        if bin_indices.ndim == len(target_shape):
-            bin_indices = bin_indices.unsqueeze(-1)
-        gathered = torch.gather(params_expanded, dim=-1, index=bin_indices).squeeze(-1)
+        if bin_idcs.ndim == len(target_shape):
+            bin_idcs = bin_idcs.unsqueeze(-1)
+        gathered = torch.gather(params_expanded, dim=-1, index=bin_idcs).squeeze(-1)
 
         return gathered
 
@@ -322,7 +322,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         value_prep, num_sample_dims = self._prepare_input(value)
 
-        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
+        bin_idcs = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
         # Calculate the log-probabilities directly for stability.
         if self.normalization_method == "sigmoid":
@@ -333,7 +333,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         else:
             log_bin_probs = log_softmax(self.logits, dim=-1)
 
-        log_probs = self._gather_from_bins(log_bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        log_probs = self._gather_from_bins(log_bin_probs, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
 
         return log_probs
 
@@ -353,9 +353,9 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         value_prep, num_sample_dims = self._prepare_input(value)
 
-        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
+        bin_idcs = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
-        probs = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        probs = self._gather_from_bins(self.bin_probs, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
 
         return probs
 
@@ -375,7 +375,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
 
         value_prep, num_sample_dims = self._prepare_input(value)
 
-        bin_indices = self._get_bin_indices(value_prep, bin_centers=self.bin_centers)
+        bin_idcs = self._get_bin_indices(value_prep, bin_centers=self.bin_centers)
 
         # Compute the cumulative sum of bin probabilities.
         # Prepend 0 for the case where no bins are active.
@@ -383,7 +383,7 @@ class PiecewiseConstantBinnedCDF(Distribution):
         zero_prefix = torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device)
         cumsum_probs = torch.cat([zero_prefix, cumsum_probs], dim=-1)  # shape: (*batch_shape, num_bins + 1)
 
-        cdf_values = self._gather_from_bins(cumsum_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        cdf_values = self._gather_from_bins(cumsum_probs, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
 
         return cdf_values
 
@@ -417,11 +417,9 @@ class PiecewiseConstantBinnedCDF(Distribution):
         cdf_edges_expanded = cdf_edges_expanded.expand(*value_prep.shape, -1)
         cdf_edges_expanded = cdf_edges_expanded.contiguous()
 
-        bin_indices = self._get_bin_indices(value_prep.unsqueeze(-1), bin_edges=cdf_edges_expanded)
+        bin_idcs = self._get_bin_indices(value_prep.unsqueeze(-1), bin_edges=cdf_edges_expanded)
 
-        quantiles = self._gather_from_bins(
-            self.bin_centers, bin_indices, num_sample_dims, target_shape=value_prep.shape
-        )
+        quantiles = self._gather_from_bins(self.bin_centers, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
 
         return quantiles  # shape: (*sample_shape, *batch_shape)
 

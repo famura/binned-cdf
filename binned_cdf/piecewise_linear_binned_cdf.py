@@ -44,8 +44,8 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
         log_mass = super().log_prob(value)  # also validates the args if self._validate_args is True
 
         # We need to gather the width of the bin the value falls into.
-        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
-        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        bin_idcs = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
+        widths = self._gather_from_bins(self.bin_widths, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
 
         # Log density = log(mass / width) = log_mass - log_width.
         eps = torch.finfo(widths.dtype).eps
@@ -69,11 +69,11 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
 
         value_prep, num_sample_dims = self._prepare_input(value)
 
-        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
+        bin_idcs = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
         # Gather normalized mass and bin width.
-        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
-        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        masses = self._gather_from_bins(self.bin_probs, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
+        widths = self._gather_from_bins(self.bin_widths, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
 
         # Density = p(bin_i) / width_i.
         eps = torch.finfo(widths.dtype).eps
@@ -98,21 +98,21 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
         value_prep, num_sample_dims = self._prepare_input(value)
 
         # Find the bin in probability space.
-        bin_indices = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
+        bin_idcs = self._get_bin_indices(value_prep, bin_edges=self.bin_edges)
 
         # Gather the interpolation parameters.
         left_edges = self._gather_from_bins(
-            self.bin_edges[:-1], bin_indices, num_sample_dims, target_shape=value_prep.shape
+            self.bin_edges[:-1], bin_idcs, num_sample_dims, target_shape=value_prep.shape
         )
-        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, target_shape=value_prep.shape)
-        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        widths = self._gather_from_bins(self.bin_widths, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
+        masses = self._gather_from_bins(self.bin_probs, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
 
         # Get base CDF at the left edge of the bin.
         # Prepend 0 for the case where no bins are active.
         cumsum_probs = torch.cumsum(self.bin_probs, dim=-1)
         zero_prefix = torch.zeros(*self.batch_shape, 1, dtype=self.logits.dtype, device=self.logits.device)
         cumsum_probs = torch.cat([zero_prefix, cumsum_probs], dim=-1)  # shape: (*batch_shape, num_bins + 1)
-        base_cdf = self._gather_from_bins(cumsum_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        base_cdf = self._gather_from_bins(cumsum_probs, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
 
         # Interpolate: cdf = base_cdf + (x_input - x_left_edge) * (mass / width)
         eps = torch.finfo(widths.dtype).eps
@@ -146,17 +146,17 @@ class PiecewiseLinearBinnedCDF(PiecewiseConstantBinnedCDF):
         cdf_edges_aligned = (
             cdf_edges.view((1,) * num_sample_dims + cdf_edges.shape).expand(*value_prep.shape, -1).contiguous()
         )
-        bin_indices = self._get_bin_indices(value_prep.unsqueeze(-1), bin_edges=cdf_edges_aligned)
+        bin_idcs = self._get_bin_indices(value_prep.unsqueeze(-1), bin_edges=cdf_edges_aligned)
 
         # Gather the probability base.
-        base_cdf = self._gather_from_bins(cdf_edges, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        base_cdf = self._gather_from_bins(cdf_edges, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
 
         # Gather the interpolation parameters.
         left_edges = self._gather_from_bins(
-            self.bin_edges[:-1], bin_indices, num_sample_dims, target_shape=value_prep.shape
+            self.bin_edges[:-1], bin_idcs, num_sample_dims, target_shape=value_prep.shape
         )
-        widths = self._gather_from_bins(self.bin_widths, bin_indices, num_sample_dims, target_shape=value_prep.shape)
-        masses = self._gather_from_bins(self.bin_probs, bin_indices, num_sample_dims, target_shape=value_prep.shape)
+        widths = self._gather_from_bins(self.bin_widths, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
+        masses = self._gather_from_bins(self.bin_probs, bin_idcs, num_sample_dims, target_shape=value_prep.shape)
 
         # Interpolate: x = x_left_edge + (target_cdf - base_cdf) * (width / mass)
         eps = torch.finfo(masses.dtype).eps
