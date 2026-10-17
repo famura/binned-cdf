@@ -5,6 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import torch
 from torch.distributions import Categorical, MixtureSameFamily, Normal
+from tqdm import trange
 
 from binned_cdf import BezierCDF
 
@@ -14,8 +15,9 @@ def fit_distribution(
     degree_x: int,
     values: torch.Tensor,
     target_masses: torch.Tensor,
-    num_steps: int,
+    num_iter: int,
     learning_rate: float,
+    label: str,
 ) -> BezierCDF:
     """Fit a Bezier distribution to quadrature-weighted target probabilities using expected NLL.
 
@@ -24,8 +26,9 @@ def fit_distribution(
         degree_x: Number of horizontal logits; one gives the fixed-axis baseline.
         values: Increasing quadrature nodes, including both support endpoints, of shape (num_points,).
         target_masses: Target PDF multiplied by integration weights at those nodes, of shape (num_points,).
-        num_steps: Number of Adam updates.
+        num_iter: Number of Adam updates.
         learning_rate: Adam learning rate, shared by all comparisons.
+        label: Model name displayed in the training progress bar.
 
     Returns:
         Fitted unbatched distribution.
@@ -38,7 +41,8 @@ def fit_distribution(
     optimizer = torch.optim.Adam(parameters, lr=learning_rate)
     bound_low, bound_up = values[0].item(), values[-1].item()
 
-    for _ in range(num_steps):
+    progress = trange(num_iter, desc=f"Fitting {label}")
+    for epoch in progress:
         optimizer.zero_grad()
         distr = BezierCDF(logits_y, logits_x, bound_low, bound_up)
         # Approximate E_target[-log p(X)] by integration, rather than drawing a noisy training sample.
@@ -47,6 +51,8 @@ def fit_distribution(
             raise RuntimeError("Non-finite NLL while fitting the reconstruction target.")
         loss.backward()
         optimizer.step()
+        if (epoch + 1) % 10 == 0 or epoch + 1 == num_iter:
+            progress.set_postfix(loss=f"{loss.item():.4f}")
 
     distr = BezierCDF(logits_y.detach(), logits_x.detach(), bound_low, bound_up)
     return distr
@@ -61,15 +67,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Fit a 1D density using BezierCDF and compare with the target distribution."
     )
-    parser.add_argument("--steps", type=int, default=1200)
+    parser.add_argument("--num-iter", type=int, default=1000)
     parser.add_argument("--degree", type=int, default=32)
-    parser.add_argument("--grid-points", type=int, default=2049)
+    parser.add_argument("--grid-points", type=int, default=2001)
     parser.add_argument("--learning-rate", type=float, default=0.05)
     parser.add_argument("--output", type=Path, default=Path("examples/results/density_reconstruction.png"))
-    parser.add_argument("--show", action="store_true")
+    parser.add_argument("--show", action="store_true", default=True)
     args = parser.parse_args()
-    if args.steps < 1 or args.degree < 2 or args.degree % 2 or args.grid_points < 3 or args.learning_rate <= 0:
-        parser.error("Require positive steps/rate, an even degree >= 2, and at least three grid points.")
+    if args.num_iter < 1 or args.degree < 2 or args.degree % 2 or args.grid_points < 3 or args.learning_rate <= 0:
+        parser.error("Require positive iterations/rate, an even degree >= 2, and at least three grid points.")
 
     torch.set_num_threads(1)
     torch.manual_seed(42)
@@ -102,10 +108,10 @@ if __name__ == "__main__":
     }
     best_label, best_nll = "", math.inf
     colors = ["#0072B2", "#D55E00", "#009E73"]
-    fig, axes = plt.subplots(1, 2, figsize=(13, 4.5), layout="constrained")
+    fig, axes = plt.subplots(1, 2, figsize=(18, 8), layout="constrained")
     axes[0].plot(evaluation_values.numpy(), target_pdf.numpy(), color="black", linestyle="--", label="Target", zorder=5)
 
-    print(f"CPU, {values.dtype}, {args.steps} Adam steps, {args.grid_points} integration nodes", flush=True)
+    print(f"CPU, {values.dtype}, {args.num_iter} Adam iterations, {args.grid_points} integration nodes", flush=True)
     print(f"Target NLL: {target_nll.item():.6f}", flush=True)
 
     fitted = {}
@@ -115,7 +121,7 @@ if __name__ == "__main__":
             f"Fitting {label}: {degree_y} vertical, {degree_x} horizontal logits ({trainable_logits} trainable)",
             flush=True,
         )
-        distr = fit_distribution(degree_y, degree_x, values, target_masses, args.steps, args.learning_rate)
+        distr = fit_distribution(degree_y, degree_x, values, target_masses, args.num_iter, args.learning_rate, label)
         with torch.no_grad():
             log_pdf = distr.log_prob(evaluation_values)
             nll = -torch.trapezoid(target_pdf * log_pdf, evaluation_values).item()
@@ -126,20 +132,24 @@ if __name__ == "__main__":
         print(f"  NLL={nll:.6f}, KL={nll - target_nll.item():.6f}, integral={integral:.6f}", flush=True)
         axes[0].plot(evaluation_values.numpy(), log_pdf.exp().numpy(), color=color, label=label)
 
+    # Plot samples from the best two-axis fit.
     samples = fitted[best_label].sample((20_000,)).numpy()
     sample_color = colors[list(models).index(best_label)]
     axes[1].hist(
         samples, bins=140, range=(bound_low, bound_up), density=True, alpha=0.45, color=sample_color, label=best_label
     )
-    axes[1].plot(evaluation_values.numpy(), target_pdf.numpy(), "k--", label="Target")
+    axes[1].plot(evaluation_values.numpy(), target_pdf.numpy(), "k--", label="target")
+
+    # Set axis labels, titles, legends, and grids.
     for axis, title in zip(axes, ["Expected-NLL reconstruction", "Samples from the best two-axis fit"], strict=True):
-        axis.set(xlabel="Value", ylabel="Density", title=title, xlim=(bound_low, bound_up))
+        axis.set(xlabel="value", ylabel="density", title=title, xlim=(bound_low, bound_up))
         axis.legend(fontsize=9)
         axis.grid(alpha=0.2)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.output, dpi=180)
-    print(f"Saved {args.output}", flush=True)
+    fig.tight_layout()
+    fig.savefig(args.output, dpi=300, bbox_inches="tight")
+    print(f"Plot saved to {args.output}", flush=True)
     if args.show:
         plt.show()
     plt.close(fig)
