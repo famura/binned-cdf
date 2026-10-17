@@ -69,7 +69,7 @@ This package also provides the more esoteric `BezierCDF`.
 from binned_cdf import BezierCDF
 
 # logits_y, logits_x = ... model outputs with the same floating dtype/device and broadcastable batch shapes
-# Degrees may differ; use logits_x = logits_y.new_zeros(1) for fixed horizontal spacing.
+# Degrees may differ; omit logits_x or pass None for fixed horizontal spacing.
 distr = BezierCDF(
     logits_y=logits_y,  # vertical increments; shape: (*batch_shape_y, degree_y)
     logits_x=logits_x,  # horizontal increments; shape: (*batch_shape_x, degree_x)

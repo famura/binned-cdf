@@ -44,11 +44,13 @@ from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBin
 )
 @pytest.mark.parametrize("degree", [40, 120], ids=["degree_40", "degree_120"])
 @pytest.mark.parametrize("normalization_method", ["softmax", "sigmoid"], ids=["softmax", "sigmoid"])
+@pytest.mark.parametrize("use_logits_x", [False, True], ids=["none_x", "tensor_x"])
 def test_distribution_reconstruction_bezier(
     target_dist_params: dict,
     plot: bool,
     degree: int,
     normalization_method: Literal["softmax", "sigmoid"],
+    use_logits_x: bool,
 ):
     """Test reconstruction of different distributions using BezierCDF.
 
@@ -78,7 +80,7 @@ def test_distribution_reconstruction_bezier(
 
     # With softmax normalization, logits = log(steps) up to a constant.
     logits_y = torch.log(target_probs + 1e-8)
-    logits_x = logits_y.new_zeros(1)
+    logits_x = logits_y.new_zeros(1) if use_logits_x else None
 
     # Create BezierCDF distribution, and get mean and variance.
     distr = BezierCDF(

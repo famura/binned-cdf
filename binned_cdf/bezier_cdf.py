@@ -25,8 +25,8 @@ class BezierCDF(Distribution):
 
     $$ p(x(t)) = \frac{B_y'(t)}{(U-L) B_x'(t)}. $$
 
-    The two polynomials may have different degrees. Both logit tensors are required.
-    A one-element ``logits_x`` fixes the horizontal curve to
+    The two polynomials may have different degrees. Omitting `logits_x`, passing `None`, or supplying
+    a one-element `logits_x` fixes the horizontal curve to
 
     $$ B_x(t) = t. $$
 
@@ -59,7 +59,7 @@ class BezierCDF(Distribution):
     def __init__(
         self,
         logits_y: torch.Tensor,
-        logits_x: torch.Tensor,
+        logits_x: torch.Tensor | None = None,
         bound_low: float = -1e3,
         bound_up: float = 1e3,
         normalization_method: Literal["sigmoid", "softmax"] = "softmax",
@@ -71,6 +71,7 @@ class BezierCDF(Distribution):
             logits_y: Raw vertical-increment logits, of shape (*batch_shape, degree_y).
             logits_x: Raw horizontal-increment logits, of shape (*batch_shape, degree_x). Batch shapes must
                 broadcast with logits_y, and both tensors must have the same floating dtype and device.
+                None uses a one-element zero tensor matching logits_y, fixing the horizontal map to the identity.
             bound_low: Lower bound of the distribution support, needs to be finite.
             bound_up: Upper bound of the distribution support, needs to be finite.
             normalization_method: How to normalize the probabilities. Either "sigmoid" or "softmax". With "sigmoid",
@@ -82,11 +83,12 @@ class BezierCDF(Distribution):
             raise ValueError("Bounds must be finite with bound_low < bound_up.")
         if logits_y.ndim < 1 or logits_y.shape[-1] < 1 or not logits_y.is_floating_point():
             raise ValueError("logits_y must be a floating tensor with at least one increment.")
-        if logits_x.ndim < 1 or logits_x.shape[-1] < 1 or not logits_x.is_floating_point():
-            raise ValueError("logits_x must be a floating tensor with at least one increment.")
-        if logits_x.dtype != logits_y.dtype or logits_x.device != logits_y.device:
+        if logits_x is not None and (logits_x.ndim < 1 or logits_x.shape[-1] < 1 or not logits_x.is_floating_point()):
+            raise ValueError("logits_x must be None or a floating tensor with at least one increment.")
+        if logits_x is not None and (logits_x.dtype != logits_y.dtype or logits_x.device != logits_y.device):
             raise ValueError("logits_x and logits_y must have the same floating dtype and device.")
 
+        logits_x = logits_y.new_zeros(1) if logits_x is None else logits_x
         batch_shape = torch.broadcast_shapes(logits_y.shape[:-1], logits_x.shape[:-1])
         self.logits_y = logits_y.expand(*batch_shape, logits_y.shape[-1])
         self.logits_x = logits_x.expand(*batch_shape, logits_x.shape[-1])
@@ -95,12 +97,12 @@ class BezierCDF(Distribution):
         self.normalization_method = normalization_method
 
         # Precompute binomial coefficients, and store them on the same device as logits.
-        self._binom_coeffs_cdf, self._binom_coeffs_pdf = self._compute_binomial_coefficients(self.degree_y)
+        self._binom_coeffs_cdf_y, self._binom_coeffs_pdf_y = self._compute_binomial_coefficients(self.degree_y)
+        self._binom_coeffs_cdf_x, self._binom_coeffs_pdf_x = self._compute_binomial_coefficients(self.degree_x)
 
         # Calculate parameters (deltas and betas).
-        self._deltas, self._betas, self._log_deltas = self._compute_deltas_and_betas(self.logits_y)
-        self._x_binom_coeffs_cdf, self._x_binom_coeffs_pdf = self._compute_binomial_coefficients(self.degree_x)
-        self._x_deltas, self._x_betas, self._x_log_deltas = self._compute_deltas_and_betas(self.logits_x)
+        self._deltas_y, self._betas_y, self._log_deltas_y = self._compute_deltas_and_betas(self.logits_y)
+        self._deltas_x, self._betas_x, self._log_deltas_x = self._compute_deltas_and_betas(self.logits_x)
 
         # Determine batch shape based on the logits. The event shape is scalar since this is a univariate distribution.
         super().__init__(batch_shape=batch_shape, event_shape=torch.Size([]), validate_args=validate_args)
@@ -176,12 +178,12 @@ class BezierCDF(Distribution):
         r"""Map physical values to curve parameters by normalizing to [0, 1], clamping, and inverting $B_x(t)$."""
         value = torch.clamp((value - self.bound_low) / self.support_range, 0, 1)
         return self._invert_bezier(
-            value, self._x_betas, self._x_deltas, self._x_binom_coeffs_cdf, self._x_binom_coeffs_pdf
+            value, self._betas_x, self._deltas_x, self._binom_coeffs_cdf_x, self._binom_coeffs_pdf_x
         )
 
     def _map_to_x_space(self, t: torch.Tensor) -> torch.Tensor:
         r"""Map values from the $T$ space $[0, 1]$ back to the original $X$ space using the bounds."""
-        t = self._eval_bezier_curve(t, self._x_betas, self._x_binom_coeffs_cdf)
+        t = self._eval_bezier_curve(t, self._betas_x, self._binom_coeffs_cdf_x)
         return t * self.support_range + self.bound_low
 
     @property
@@ -219,7 +221,8 @@ class BezierCDF(Distribution):
         $$ E[X] = L + (U-L) \int_0^1 B_x(t) B_y'(t) \, dt $$
 
         Note:
-            Gaussian quadrature is polynomial-exact here, up to floating-point error.
+            Fixed horizontal spacing uses exact Beta-mixture moments; otherwise Gaussian quadrature is
+            polynomial-exact, up to floating-point error.
 
         Returns:
             Tensor of shape (*batch_shape,).
@@ -236,7 +239,8 @@ class BezierCDF(Distribution):
         $$ Var[X] = (U-L)^2 (E[Z^2] - E[Z]^2) $$
 
         Note:
-            Gaussian quadrature is polynomial-exact here, up to floating-point error.
+            Fixed horizontal spacing uses exact Beta-mixture moments; otherwise Gaussian quadrature is
+            polynomial-exact, up to floating-point error.
 
         Returns:
             Tensor of shape (*batch_shape,).
@@ -279,8 +283,8 @@ class BezierCDF(Distribution):
             weights: Positive integration weights corresponding to nodes, with the same shape. They sum
                 to one along the quadrature dimension, up to floating-point error.
         """
-        indices = torch.arange(1, num_points, dtype=self.logits_y.dtype, device=self.logits_y.device)
-        off_diagonal = indices / (4 * indices.square() - 1).sqrt()
+        idcs = torch.arange(1, num_points, dtype=self.logits_y.dtype, device=self.logits_y.device)
+        off_diagonal = idcs / (4 * idcs.square() - 1).sqrt()
 
         nodes, vectors = torch.linalg.eigh(torch.diag(off_diagonal, 1) + torch.diag(off_diagonal, -1))
 
@@ -292,7 +296,7 @@ class BezierCDF(Distribution):
         return nodes, weights
 
     def _moments(self) -> tuple[torch.Tensor, torch.Tensor]:
-        r"""Compute the first two raw moments of the normalized horizontal coordinate by Gaussian quadrature.
+        r"""Compute the first two raw moments analytically for a fixed axis, otherwise by Gaussian quadrature.
 
         For support bounds $L$ and $U$, let $Z = (X - L) / (U - L) = B_x(T)$. The curve parameter $T$
         has CDF $B_y(t)$ and density $B_y'(t)$ on $[0, 1]$. Changing variables from $X$ to $T$ cancels
@@ -300,6 +304,11 @@ class BezierCDF(Distribution):
 
         $$ p_X(x(t)) x'(t) = B_y'(t), \qquad
         E[Z^k] = \int_0^1 B_x(t)^k B_y'(t) \, dt, \qquad k \in \{1, 2\}. $$
+
+        For degree_x = 1, $Z=T$ and the exact Beta-mixture moments avoid quadrature:
+
+        $$ e_t = \sum_{j=1}^{n_y} \Delta_{j-1} \frac{j}{n_y+1}, \qquad
+        e_{t2} = \sum_{j=1}^{n_y} \Delta_{j-1} \frac{j(j+1)}{(n_y+1)(n_y+2)}. $$
 
         The vertical derivative is evaluated from its degree-$(n_y - 1)$ Bernstein basis:
 
@@ -323,7 +332,8 @@ class BezierCDF(Distribution):
 
         Note:
             Both moments are polynomial-exact up to floating-point error and retain gradients through both axes.
-            Tensors use the logits' dtype and device, subject to the requirements of _quadrature.
+            The fixed axis retains explicit zero gradients. Tensors use the logits' dtype and device;
+            only learned horizontal axes are subject to the requirements of _quadrature.
             No numerical inversion or support rescaling is performed here; mean and variance apply the bounds.
 
         Returns:
@@ -331,13 +341,33 @@ class BezierCDF(Distribution):
             e_t2: Second raw moment $E[Z^2]$, with shape (*batch_shape,); this is not the variance.
                 Despite their names, these are moments of $Z$, not of $T$, unless $B_x(t) = t$.
         """
+        if self.degree_x == 1:
+            idcs = torch.arange(1, self.degree_y + 1, dtype=self.logits_y.dtype, device=self.logits_y.device)
+            component_1st_mom = idcs / (self.degree_y + 1)  # shape: (degree_y,)
+            component_2nd_mom = component_1st_mom * (idcs + 1) / (self.degree_y + 2)  # shape: (degree_y,)
+
+            # Combine the component raw moments using the Beta-mixture weights.
+            zero_x = self.logits_x[..., 0] * 0  # keep autograd connection
+            e_t = (self._deltas_y * component_1st_mom).sum(dim=-1) + zero_x  # shape: (*batch_shape,)
+            e_t2 = (self._deltas_y * component_2nd_mom).sum(dim=-1) + zero_x  # shape: (*batch_shape,)
+
+            return e_t, e_t2
+
+        # Compute the Gauss-Legendre nodes t_i and weights w_i for integration over t in [0, 1].
+        # Choose num_points m so 2*m - 1 >= 2*degree_x + degree_y - 1, covering both raw-moment integrands.
         nodes, weights = self._quadrature(num_points=(2 * self.degree_x + self.degree_y + 1) // 2)
 
-        horizontal = self._eval_bezier_curve(nodes, self._x_betas, self._x_binom_coeffs_cdf)
+        # Compute the normalized x-axis coordinates z_i = B_x(t_i).
+        normalized_x_coords = self._eval_bezier_curve(nodes, self._betas_x, self._binom_coeffs_cdf_x)
 
-        masses = weights * self.degree_y * self._eval_bezier_curve(nodes, self._deltas, self._binom_coeffs_pdf)
+        # Quadrature masses w_i * B_y'(t_i); the horizontal Jacobian cancels when integrating in t.
+        masses = weights * self.degree_y * self._eval_bezier_curve(nodes, self._deltas_y, self._binom_coeffs_pdf_y)
 
-        return (masses * horizontal).sum(dim=0), (masses * horizontal.square()).sum(dim=0)
+        # Integrate z and z^2 over the quadrature dimension, keeping the batch dimensions.
+        e_t = (masses * normalized_x_coords).sum(dim=0)
+        e_t2 = (masses * normalized_x_coords.square()).sum(dim=0)
+
+        return e_t, e_t2
 
     def _eval_bezier_curve(
         self,
@@ -363,9 +393,9 @@ class BezierCDF(Distribution):
             t: Normalized input values in [0, 1].
                 Expected shape: (*sample_shape, *batch_shape).
             weights: The coefficients for the basis polynomials.
-                Expected shape: (*batch_shape, d + 1).
+                Expected shape: (*batch_shape, degree + 1).
             binom_coeffs: Precomputed binomial coefficients corresponding to the polynomial's degree.
-                Expected shape: (d + 1,).
+                Expected shape: (degree + 1,).
 
         Returns:
             The evaluated polynomial values.
@@ -380,8 +410,8 @@ class BezierCDF(Distribution):
         # Add an empty dimension to t for broadcasting, resulting in shape: (*sample_shape, *batch_shape, 1).
         t_expanded = t.unsqueeze(-1)
 
-        # Compute the entire basis in one shot.
-        # PyTorch broadcasts the shapes to shape (*sample_shape, *batch_shape, degree).
+        # Bernstein basis B_{i,d}(t) = binom(d, i) * t**i * (1-t)**(d-i), with d = nun_coeffs - 1.
+        # Broadcasting gives shape (*t.shape, nun_coeffs), with one entry per basis polynomial.
         basis = binom_coeffs * (t_expanded**i) * ((1 - t_expanded) ** (nun_coeffs - 1 - i))
 
         # Multiply by weights and sum across the final dimension, resulting in shape (*sample_shape, *batch_shape).
@@ -397,8 +427,9 @@ class BezierCDF(Distribution):
         $$ \log B'(t) = \log n + \operatorname{logsumexp}_i\!\left(
         \log \Delta_i + \log \binom{n-1}{i} + i\log t + (n-1-i)\log(1-t)\right). $$
 
-        This avoids the numerically problematic log(polynomial + eps) path. Exact endpoints are handled
-        separately, where only the first or last Bernstein basis term survives.
+        This avoids the numerically problematic log(polynomial + eps) path. Exact endpoints are handled separately,
+        where only the first or last Bernstein basis term survives.
+        Degree-one axes return the constant log derivative directly, preserving broadcasting and zero input gradients.
 
         Args:
             t: Curve parameters in [0, 1], of shape (*sample_shape, *batch_shape).
@@ -409,19 +440,29 @@ class BezierCDF(Distribution):
             Log derivatives with the broadcast sample/batch shape, before support-range scaling.
         """
         degree = log_deltas.shape[-1]
+        if degree == 1:
+            # Degree-one axes have a constant derivative. This is not necessarily the past-path for the constantly
+            # spaced x-axis.
+            return t * 0 + log_deltas[..., 0]
+
         # Indices for the Bernstein basis: i = 0, ..., n-1. Shape: (n,).
-        indices = torch.arange(degree, device=t.device, dtype=t.dtype)
+        idcs = torch.arange(degree, device=t.device, dtype=t.dtype)
+
         # Clamp away from exact 0/1 to avoid log(0), then append a basis dimension: (*t.shape, 1).
-        t_safe = t.clamp(torch.finfo(t.dtype).tiny, 1 - torch.finfo(t.dtype).eps).unsqueeze(-1)
+        t_safe = t.clamp(min=torch.finfo(t.dtype).tiny, max=1 - torch.finfo(t.dtype).eps).unsqueeze(-1)
+
         # Log of each Bernstein basis term: log(binom) + i*log(t) + (n-1-i)*log(1-t).
         # log_basis shape: (*t.shape, n); singleton batch dimensions expand when adding log_deltas.
-        log_basis = binom_coeffs.log() + indices * t_safe.log() + (degree - 1 - indices) * torch.log1p(-t_safe)
+        log_basis = binom_coeffs.log() + idcs * t_safe.log() + (degree - 1 - idcs) * torch.log1p(-t_safe)
+
         # Broadcast log_deltas (*batch_shape, n) across samples, then sum weighted terms via logsumexp.
         # The degree factor accounts for differentiation; result shape: (*sample_shape, *batch_shape).
-        result = math.log(degree) + torch.logsumexp(log_deltas + log_basis, dim=-1)
+        log_derivative = math.log(degree) + torch.logsumexp(log_deltas + log_basis, dim=-1)
+
         # Restore analytic endpoint derivatives instead of returning the clamped interior approximations.
-        result = torch.where(t == 0, math.log(degree) + log_deltas[..., 0], result)
-        return torch.where(t == 1, math.log(degree) + log_deltas[..., -1], result)
+        log_derivative = torch.where(t == 0, math.log(degree) + log_deltas[..., 0], log_derivative)
+        log_derivative = torch.where(t == 1, math.log(degree) + log_deltas[..., -1], log_derivative)
+        return log_derivative
 
     def _invert_bezier(
         self,
@@ -561,7 +602,7 @@ class BezierCDF(Distribution):
         t = self._map_to_t_space(x)
 
         # Construct and evaluate the Bezier curve in T space.
-        return self._eval_bezier_curve(t, weights=self._betas, binom_coeffs=self._binom_coeffs_cdf)
+        return self._eval_bezier_curve(t, weights=self._betas_y, binom_coeffs=self._binom_coeffs_cdf_y)
 
     def prob(self, value: torch.Tensor) -> torch.Tensor:
         """Compute probability density at given values.
@@ -578,7 +619,8 @@ class BezierCDF(Distribution):
     def log_prob(self, value: torch.Tensor) -> torch.Tensor:
         r"""Compute the log-probability density at given values, entirely in log-space for numerical stability.
 
-        Uses $\log p(x(t)) = \log B_y'(t) - \log B_x'(t) - \log(U-L)$.
+        $$ \log p(x(t)) = \log B_y'(t) - \log B_x'(t) - \log(U-L) $$
+
         Both derivatives are evaluated with logsumexp. With fixed horizontal spacing, $B_x'(t)=1$.
 
         Args:
@@ -589,9 +631,17 @@ class BezierCDF(Distribution):
             Output shape: same as `value` argument.
         """
         x = value.to(device=self.logits_y.device, dtype=self.logits_y.dtype)
+
+        # Map X in [bound_low, bound_up] to T in [0, 1].
         t = self._map_to_t_space(x)
-        log_pdf = self._eval_log_derivative(t, self._log_deltas, self._binom_coeffs_pdf)
-        log_pdf = log_pdf - self._eval_log_derivative(t, self._x_log_deltas, self._x_binom_coeffs_pdf)
+
+        # Start with log B_y'(t): probability change per unit t, not yet the physical log-density.
+        log_pdf = self._eval_log_derivative(t, self._log_deltas_y, self._binom_coeffs_pdf_y)
+
+        # Divide by horizontal stretching B_x'(t), hence subtract its log, to get density per normalized x.
+        log_pdf = log_pdf - self._eval_log_derivative(t, self._log_deltas_x, self._binom_coeffs_pdf_x)
+
+        # Divide by the support width U-L (subtract its log) to get density per physical x.
         log_pdf = log_pdf - math.log(self.support_range)
 
         # Mask values outside the support.
@@ -613,10 +663,17 @@ class BezierCDF(Distribution):
         """
         if num_quadrature_points < 1:
             raise ValueError("num_quadrature_points must be positive.")
+
         nodes, weights = self._quadrature(num_quadrature_points)
-        log_derivative_y = self._eval_log_derivative(nodes, self._log_deltas, self._binom_coeffs_pdf)
+
+        # B_y'(t) is the density in parameter space; evaluate its log at the quadrature nodes.
+        log_derivative_y = self._eval_log_derivative(nodes, self._log_deltas_y, self._binom_coeffs_pdf_y)
+
+        # Change variables: log p_X(x(t)) = log p_T(t) - log x'(t) = log B_y'(t) - log(U-L) - log B_x'(t).
         log_pdf = log_derivative_y - math.log(self.support_range)
-        log_pdf = log_pdf - self._eval_log_derivative(nodes, self._x_log_deltas, self._x_binom_coeffs_pdf)
+        log_pdf = log_pdf - self._eval_log_derivative(nodes, self._log_deltas_x, self._binom_coeffs_pdf_x)
+
+        # H(X) = -∫_0^1 B_y'(t) * log p_X(x(t)) dt, with exp(log_derivative_y) = B_y'(t).
         return -(weights * log_derivative_y.exp() * log_pdf).sum(dim=0)
 
     def icdf(
@@ -659,18 +716,20 @@ class BezierCDF(Distribution):
         """
         if num_iter < 1 or not 0 < newton_damping <= 1 or convergence_eps_factor <= 0:
             raise ValueError("Require num_iter >= 1, 0 < newton_damping <= 1, and convergence_eps_factor > 0.")
+
         q = value.to(device=self.logits_y.device, dtype=self.logits_y.dtype)
         t = self._invert_bezier(
             q,
-            self._betas,
-            self._deltas,
-            self._binom_coeffs_cdf,
-            self._binom_coeffs_pdf,
+            self._betas_y,
+            self._deltas_y,
+            self._binom_coeffs_cdf_y,
+            self._binom_coeffs_pdf_y,
             num_iter,
             use_newton,
             newton_damping,
             convergence_eps_factor,
         )
+
         return self._map_to_x_space(t)
 
     def rsample(self, sample_shape: torch.Size | list[int] | tuple[int, ...] = _size) -> torch.Tensor:
@@ -687,4 +746,5 @@ class BezierCDF(Distribution):
 
         # Sample uniform noise, u ~ U(0, 1).
         u = torch.rand(shape, dtype=self.logits_y.dtype, device=self.logits_y.device)
+
         return self.icdf(u)

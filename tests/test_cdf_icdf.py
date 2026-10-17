@@ -371,12 +371,13 @@ def test_icdf_fixed_quantiles(
 
 @pytest.mark.parametrize("degree", [5, 20, 100])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
-def test_bezier_icdf_newton_bisection_consistency(degree: int, batch_size: int | None):
+@pytest.mark.parametrize("use_logits_x", [False, True], ids=["none_x", "tensor_x"])
+def test_bezier_icdf_newton_bisection_consistency(degree: int, batch_size: int | None, use_logits_x: bool):
     """Test that the Newton and bisection methods for ICDF yield consistent results."""
     torch.manual_seed(42)
     logits = torch.randn((2 * degree,)) if batch_size is None else torch.randn(batch_size, 2 * degree)
     logits_y, logits_x = logits.chunk(2, dim=-1)
-    distr = BezierCDF(logits_y, logits_x, bound_low=-5, bound_up=5)
+    distr = BezierCDF(logits_y, logits_x if use_logits_x else None, bound_low=-5, bound_up=5)
 
     quantiles = torch.tensor([0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99])
     if batch_size is not None:
@@ -406,22 +407,23 @@ def test_bezier_icdf_newton_bisection_consistency(degree: int, batch_size: int |
     )
 
 
-def test_bezier_unequal_axes():
+@pytest.mark.parametrize("use_logits_x", [False, True], ids=["none_x", "tensor_x"])
+def test_bezier_unequal_axes(use_logits_x: bool):
     """Check unequal axis degrees, broadcasting, inverse gradients, and equivalence to an affine horizontal axis."""
     # Share the degree-four horizontal axis across two degree-three CDFs.
     logits_x = torch.tensor([0.5, -0.4, 0.2, -0.1], dtype=torch.float64, requires_grad=True)
 
     logits_y = torch.tensor([[0.2, -0.1, 0.4], [-0.3, 0.1, 0.2]], dtype=torch.float64, requires_grad=True)
-    distr = BezierCDF(logits_y, logits_x, bound_low=0, bound_up=1)
+    distr = BezierCDF(logits_y, logits_x if use_logits_x else None, bound_low=0, bound_up=1)
 
     # The evaluation outputs have shape (3, 2).
     values = torch.tensor([[0.13], [0.41], [0.86]], dtype=torch.float64, requires_grad=True)
 
     def _evaluate(
         logits_y: torch.Tensor, logits_x: torch.Tensor, eval_points: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        distr = BezierCDF(logits_y, logits_x, bound_low=0, bound_up=1)
-        return distr.cdf(eval_points), distr.log_prob(eval_points), distr.icdf(eval_points)
+    ) -> tuple[torch.Tensor, ...]:
+        distr = BezierCDF(logits_y, logits_x if use_logits_x else None, bound_low=0, bound_up=1)
+        return distr.cdf(eval_points), distr.log_prob(eval_points), distr.icdf(eval_points), distr.mean, distr.variance
 
     # Check that the gradients are correctly computed for the BezierCDF with unequal axes.
     assert torch.autograd.gradcheck(_evaluate, inputs=(logits_y, logits_x, values))
@@ -442,11 +444,11 @@ def test_bezier_unequal_axes():
     # Check that the reparameterized samples have the correct shape and that their gradients are finite and non-zero.
     samples = distr.rsample((2, 3))
     assert samples.shape == (2, 3, 2)
-    for gradient in torch.autograd.grad(samples.sum(), inputs=(logits_x, logits_y)):
+    for gradient in torch.autograd.grad(samples.sum(), inputs=(logits_x, logits_y) if use_logits_x else (logits_y,)):
         assert torch.isfinite(gradient).all() and gradient.abs().sum() > 0
 
     # Check that uniform horizontal increments represent the same affine map at any degree.
-    baseline = BezierCDF(logits_y.detach(), logits_y.new_zeros(1), 0, 1)
+    baseline = BezierCDF(logits_y.detach(), bound_low=0, bound_up=1)
     uniform_x = BezierCDF(logits_y.detach(), torch.zeros_like(logits_x), 0, 1)
     torch.testing.assert_close(uniform_x.prob(values), baseline.prob(values))
     torch.testing.assert_close(uniform_x.cdf(values), baseline.cdf(values))

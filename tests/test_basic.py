@@ -10,6 +10,7 @@ from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBin
 from tests.conftest import needs_cuda
 
 
+@pytest.mark.parametrize("use_logits_x", [False, True], ids=["none_x", "tensor_x"])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
 @pytest.mark.parametrize("degree", [1, 2, 7, 1000])
 @pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
@@ -28,12 +29,13 @@ def test_basic_properties_bezier(
     bound_low: int,
     bound_up: int,
     use_cuda: bool,
+    use_logits_x: bool,
 ):
     """Test basic properties of the BezierCDF."""
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits_y = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
     logits_y = logits_y.to(device)
-    logits_x = logits_y.new_zeros(1).to(device)
+    logits_x = logits_y.new_zeros(1) if use_logits_x else None
 
     if degree < 1000:
         distr = BezierCDF(logits_y, logits_x, bound_low, bound_up, normalization_method=normalization_method)
@@ -45,6 +47,8 @@ def test_basic_properties_bezier(
     # Test that tensors are on the correct device.
     assert distr.logits_y.device == device
     assert distr.logits_x.device == device
+    assert distr.logits_x.dtype == logits_y.dtype
+    assert distr.degree_x == 1
 
     # Test properties directly coming from the arguments.
     assert distr.bound_low == bound_low
@@ -223,6 +227,7 @@ def test_expand(
     assert expanded_dist.bin_widths.shape == distr.bin_widths.shape, "bin_widths shape should be unchanged"
 
 
+@pytest.mark.parametrize("use_logits_x", [False, True], ids=["none_x", "tensor_x"])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
 @pytest.mark.parametrize("degree", [2, 50])
 @pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
@@ -241,6 +246,7 @@ def test_prob_random_logits_bezier(
     bound_low: int,
     bound_up: int,
     use_cuda: bool,
+    use_logits_x: bool,
 ):
     """Test probability evaluation with random logits for BezierCDF."""
     torch.manual_seed(42)
@@ -248,7 +254,7 @@ def test_prob_random_logits_bezier(
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits_y = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
     logits_y = logits_y.to(device)
-    logits_x = logits_y.new_zeros(1).to(device)
+    logits_x = logits_y.new_zeros(1) if use_logits_x else None
     distr = BezierCDF(logits_y, logits_x, bound_low, bound_up, normalization_method=normalization_method)
 
     # Evaluate at evenly-spaced interior points (excluding bounds to avoid boundary edge cases).
@@ -329,6 +335,7 @@ def test_prob_random_logits_binned(
     assert prob_at_up.shape == expected_scalar_shape
 
 
+@pytest.mark.parametrize("use_logits_x", [False, True], ids=["none_x", "tensor_x"])
 @pytest.mark.parametrize("batch_size", [None, 1, 8])
 @pytest.mark.parametrize("degree", [2, 50])
 @pytest.mark.parametrize("normalization_method", ["sigmoid", "softmax"], ids=["sigmoid", "softmax"])
@@ -347,6 +354,7 @@ def test_prob_bezier(
     bound_low: int,
     bound_up: int,
     use_cuda: bool,
+    use_logits_x: bool,
 ):
     """Test prob() returns valid densities and is consistent with log_prob() for BezierCDF."""
     torch.manual_seed(42)
@@ -354,7 +362,7 @@ def test_prob_bezier(
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
     logits_y = logits.to(device)
-    logits_x = logits_y.new_zeros(1).to(device)
+    logits_x = logits_y.new_zeros(1) if use_logits_x else None
     distr = BezierCDF(logits_y, logits_x, bound_low, bound_up, normalization_method=normalization_method)
 
     # Evaluate at evenly-spaced interior points (excluding bounds to avoid boundary edge cases).
@@ -561,11 +569,12 @@ def test_shannon_entropy(
     ],
 )
 @pytest.mark.parametrize(
-    "distr_class,log_spacing,num_bins",
+    "distr_class,log_spacing,num_bins,use_logits_x",
     [
-        pytest.param(BezierCDF, None, 95, id="BezierCDF"),
-        pytest.param(PiecewiseLinearBinnedCDF, False, 10, id="PiecewiseLinearBinnedCDF-linear_spacing"),
-        pytest.param(PiecewiseLinearBinnedCDF, True, 40, id="PiecewiseLinearBinnedCDF-log_spacing"),
+        pytest.param(BezierCDF, None, 95, False, id="BezierCDF-none_x"),
+        pytest.param(BezierCDF, None, 95, True, id="BezierCDF-tensor_x"),
+        pytest.param(PiecewiseLinearBinnedCDF, False, 10, False, id="PiecewiseLinearBinnedCDF-linear_spacing"),
+        pytest.param(PiecewiseLinearBinnedCDF, True, 40, False, id="PiecewiseLinearBinnedCDF-log_spacing"),
     ],
 )
 def test_differential_entropy(
@@ -573,6 +582,7 @@ def test_differential_entropy(
     distr_class: type[BezierCDF] | type[PiecewiseLinearBinnedCDF],
     log_spacing: bool | None,
     num_bins: int,
+    use_logits_x: bool,
 ):
     """Test differential entropy computation against theoretical values from known distributions."""
     torch.manual_seed(42)
@@ -593,7 +603,7 @@ def test_differential_entropy(
         eval_points = torch.linspace(bound_low, bound_up, num_bins)
         target_probs = torch.exp(target_distr.log_prob(eval_points))
         logits_y = torch.log(target_probs + 1e-8)
-        logits_x = logits_y.new_zeros(1)
+        logits_x = logits_y.new_zeros(1) if use_logits_x else None
         dist = BezierCDF(logits_y.unsqueeze(0), logits_x, bound_low=bound_low, bound_up=bound_up)
     elif distr_class is PiecewiseLinearBinnedCDF:
         # Use the distr_class's own bin construction to ensure matching shapes between distributions.
@@ -641,9 +651,17 @@ def test_differential_entropy(
     )
 
 
-@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize(
+    "distr_class,use_logits_x",
+    [
+        pytest.param(BezierCDF, False, id="BezierCDF-none_x"),
+        pytest.param(BezierCDF, True, id="BezierCDF-tensor_x"),
+        pytest.param(PiecewiseLinearBinnedCDF, False, id="PiecewiseLinearBinnedCDF"),
+    ],
+)
 def test_differential_entropy_batched_smoke(
     distr_class: type[BezierCDF] | type[PiecewiseLinearBinnedCDF],
+    use_logits_x: bool,
     batch_size: int = 4,
     num_bins: int = 20,
     bound_low: float = -5.0,
@@ -655,7 +673,7 @@ def test_differential_entropy_batched_smoke(
 
     # Create the distribution.
     extra_init_kwargs: dict[str, Any] = {"log_spacing": True} if distr_class is PiecewiseLinearBinnedCDF else {}
-    if distr_class is BezierCDF:
+    if distr_class is BezierCDF and use_logits_x:
         extra_init_kwargs["logits_x"] = logits_y.new_zeros(1)
     dist = distr_class(logits_y, bound_low=bound_low, bound_up=bound_up, **extra_init_kwargs)
 
