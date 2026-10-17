@@ -89,9 +89,13 @@ def benchmark_class(
 ) -> ResultsMap | None:
     """Benchmarks a single distribution class. Returns None if the class fails (e.g. degree overflow)."""
     try:
-        distr = distr_class(logits)
+        extra_init_kwargs: dict[str, Any] = {}
+        if distr_class is BezierCDF:
+            # Split the bins between the vertical and horizontal control-point increments.
+            logits, extra_init_kwargs["logits_x"] = logits.chunk(2, dim=-1)
+        distr = distr_class(logits, **extra_init_kwargs)
         return {
-            "__init__": measure_performance(distr_class, logits, num_iter_measure=num_iter),
+            "__init__": measure_performance(distr_class, logits, num_iter_measure=num_iter, **extra_init_kwargs),
             "prob": measure_performance(distr.prob, y, num_iter_measure=num_iter),
             "log_prob": measure_performance(distr.log_prob, y, num_iter_measure=num_iter),
             "cdf": measure_performance(distr.cdf, y, num_iter_measure=num_iter),

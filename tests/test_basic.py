@@ -31,25 +31,28 @@ def test_basic_properties_bezier(
 ):
     """Test basic properties of the BezierCDF."""
     device = torch.device("cuda:0" if use_cuda else "cpu")
-    logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
-    logits = logits.to(device)
+    logits_y = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
+    logits_y = logits_y.to(device)
 
     if degree < 1000:
-        distr = BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
+        distr = BezierCDF(logits_y, bound_low=bound_low, bound_up=bound_up, normalization_method=normalization_method)
     else:
         with pytest.raises(ValueError, match="Binomial coefficients became infinite for degree"):
-            BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
+            BezierCDF(logits_y, bound_low=bound_low, bound_up=bound_up, normalization_method=normalization_method)
         return
 
     # Test that tensors are on the correct device.
-    assert distr.logits.device == device
+    assert distr.logits_y.device == device
+    assert distr.logits_x.device == device
+    assert distr.logits_x.dtype == logits_y.dtype
+    assert distr.degree_x == 1
 
     # Test properties directly coming from the arguments.
     assert distr.bound_low == bound_low
     assert distr.bound_up == bound_up
     assert distr.support.lower_bound == bound_low
     assert distr.support.upper_bound == bound_up
-    assert distr.arg_constraints == {"logits": constraints.real}
+    assert distr.arg_constraints == {"logits_y": constraints.real, "logits_x": constraints.real}
     assert distr.batch_shape == torch.Size([]) if batch_size is None else torch.Size([batch_size])
     assert distr.event_shape == torch.Size([])
 
@@ -67,6 +70,20 @@ def test_basic_properties_bezier(
     assert torch.all(torch.isfinite(mean))
     assert torch.all(var >= 0)
     assert torch.all(torch.isfinite(var))
+
+
+def test_bezier_fixed_axis_explicit_matches_default():
+    """An explicit one-increment horizontal axis is the default fixed axis."""
+    logits_y = torch.tensor([0.2, -0.1, 0.4])
+    values = torch.tensor([0.13, 0.41, 0.86])
+    default = BezierCDF(logits_y, bound_low=0, bound_up=1)
+    explicit = BezierCDF(logits_y, logits_y.new_zeros(1), bound_low=0, bound_up=1)
+
+    torch.testing.assert_close(explicit.cdf(values), default.cdf(values))
+    torch.testing.assert_close(explicit.log_prob(values), default.log_prob(values))
+    torch.testing.assert_close(explicit.icdf(values), default.icdf(values))
+    torch.testing.assert_close(explicit.mean, default.mean)
+    torch.testing.assert_close(explicit.variance, default.variance)
 
 
 @pytest.mark.parametrize("distr_class", [PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF])
@@ -244,9 +261,9 @@ def test_prob_random_logits_bezier(
     torch.manual_seed(42)
 
     device = torch.device("cuda:0" if use_cuda else "cpu")
-    logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
-    logits = logits.to(device)
-    distr = BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
+    logits_y = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
+    logits_y = logits_y.to(device)
+    distr = BezierCDF(logits_y, bound_low=bound_low, bound_up=bound_up, normalization_method=normalization_method)
 
     # Evaluate at evenly-spaced interior points (excluding bounds to avoid boundary edge cases).
     num_eval = degree
@@ -350,8 +367,8 @@ def test_prob_bezier(
 
     device = torch.device("cuda:0" if use_cuda else "cpu")
     logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
-    logits = logits.to(device)
-    distr = BezierCDF(logits, bound_low, bound_up, normalization_method=normalization_method)
+    logits_y = logits.to(device)
+    distr = BezierCDF(logits_y, bound_low=bound_low, bound_up=bound_up, normalization_method=normalization_method)
 
     # Evaluate at evenly-spaced interior points (excluding bounds to avoid boundary edge cases).
     num_eval = degree
@@ -588,8 +605,8 @@ def test_differential_entropy(
         # BezierCDF uses evenly-spaced evaluation points and log-probabilities as logits.
         eval_points = torch.linspace(bound_low, bound_up, num_bins)
         target_probs = torch.exp(target_distr.log_prob(eval_points))
-        logits = torch.log(target_probs + 1e-8)
-        dist = BezierCDF(logits=logits.unsqueeze(0), bound_low=bound_low, bound_up=bound_up)
+        logits_y = torch.log(target_probs + 1e-8)
+        dist = BezierCDF(logits_y.unsqueeze(0), bound_low=bound_low, bound_up=bound_up)
     elif distr_class is PiecewiseLinearBinnedCDF:
         # Use the distr_class's own bin construction to ensure matching shapes between distributions.
         assert log_spacing is not None, "log_spacing must be specified for PiecewiseLinearBinnedCDF"
@@ -636,7 +653,13 @@ def test_differential_entropy(
     )
 
 
-@pytest.mark.parametrize("distr_class", [BezierCDF, PiecewiseLinearBinnedCDF])
+@pytest.mark.parametrize(
+    "distr_class",
+    [
+        pytest.param(BezierCDF, id="BezierCDF"),
+        pytest.param(PiecewiseLinearBinnedCDF, id="PiecewiseLinearBinnedCDF"),
+    ],
+)
 def test_differential_entropy_batched_smoke(
     distr_class: type[BezierCDF] | type[PiecewiseLinearBinnedCDF],
     batch_size: int = 4,
@@ -646,11 +669,11 @@ def test_differential_entropy_batched_smoke(
 ):
     """Smoke test for differential entropy computation in batched distributions."""
     # Create random logits for a batched distribution.
-    logits = torch.randn(batch_size, num_bins)
+    logits_y = torch.randn(batch_size, num_bins)
 
     # Create the distribution.
     extra_init_kwargs: dict[str, Any] = {"log_spacing": True} if distr_class is PiecewiseLinearBinnedCDF else {}
-    dist = distr_class(logits, bound_low, bound_up, **extra_init_kwargs)
+    dist = distr_class(logits_y, bound_low=bound_low, bound_up=bound_up, **extra_init_kwargs)
 
     # Compute the differential entropy for the batch.
     entropy = dist.entropy()

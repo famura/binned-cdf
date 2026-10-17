@@ -1,10 +1,13 @@
-from typing import Literal
+import argparse
+from pathlib import Path
+from typing import Any, Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 import torch
 from sklearn.datasets import make_moons
+from tqdm import trange
 
 from binned_cdf import BezierCDF, PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF
 
@@ -61,19 +64,47 @@ class DensityNet(torch.nn.Module):
         features = self.shared(x)
         logits = self.head(features)
         logits = logits.reshape(*logits.shape[:-1], 2, self.num_bins)
+        extra_init_kwargs: dict[str, Any] = {}
+        if self.distr_class is BezierCDF:
+            # Split the bins between the vertical and horizontal control-point increments.
+            logits, extra_init_kwargs["logits_x"] = logits.chunk(2, dim=-1)
         return self.distr_class(
-            logits, bound_low=self.bound_low, bound_up=self.bound_up, normalization_method=self.normalization_method
+            logits,
+            bound_low=self.bound_low,
+            bound_up=self.bound_up,
+            normalization_method=self.normalization_method,
+            **extra_init_kwargs,
         )
 
 
 if __name__ == "__main__":
     """Main function to execute the density estimation example."""
-    # Configure.
-    bound_low_2moons = -1.5  # prior knowledge about the dataset
-    bound_up_2moons = 2.5  # prior knowledge about the dataset
-    distr_class: NewDistributionType = PiecewiseLinearBinnedCDF
-    num_bins = 100
-    normalization_method: Literal["softmax", "sigmoid"] = "softmax" if distr_class == BezierCDF else "sigmoid"
+    distr_classes: dict[str, NewDistributionType] = {
+        cls.__name__: cls for cls in (PiecewiseConstantBinnedCDF, PiecewiseLinearBinnedCDF, BezierCDF)
+    }
+    parser = argparse.ArgumentParser(description="Fit a 2D density estimator to two moons.")
+    parser.add_argument("--distr-class", choices=distr_classes, default=PiecewiseLinearBinnedCDF.__name__)
+    parser.add_argument("--bound-low", type=float, default=-1.5)
+    parser.add_argument("--bound-up", type=float, default=2.5)
+    parser.add_argument("--num-bins", type=int, default=50)
+    parser.add_argument("--num-iter", type=int, default=6000)
+    parser.add_argument("--grid-points", type=int, default=200)
+    parser.add_argument("--learning-rate", type=float)
+    parser.add_argument("--normalization-method", choices=("softmax", "sigmoid"))
+    parser.add_argument(
+        "--output", type=Path, default=Path(__file__).parent / "results/2D_density_estimation_result.png"
+    )
+    parser.add_argument("--show", action="store_true", default=True)
+    args = parser.parse_args()
+    if args.num_iter < 1 or args.num_bins < 2 or args.grid_points < 2 or args.bound_low >= args.bound_up:
+        parser.error("Require positive iterations, at least two bins/grid points, and bound_low < bound_up.")
+    if args.learning_rate is not None and args.learning_rate <= 0:
+        parser.error("Learning rate must be positive.")
+
+    distr_class = distr_classes[args.distr_class]
+    normalization_method: Literal["softmax", "sigmoid"] = args.normalization_method or (
+        "softmax" if distr_class is BezierCDF else "sigmoid"
+    )
 
     # Create ground truth data.
     X, _ = make_moons(n_samples=1500, noise=0.1)
@@ -86,34 +117,31 @@ if __name__ == "__main__":
 
     # Create the model and optimizer.
     model = DensityNet(
-        num_bins=num_bins,
+        num_bins=args.num_bins,
         distr_class=distr_class,
         normalization_method=normalization_method,
-        bound_low=bound_low_2moons,
-        bound_up=bound_up_2moons,
+        bound_low=args.bound_low,
+        bound_up=args.bound_up,
     )
     model = model.to(device)
-    lr = 1e-3 if distr_class == BezierCDF else 5e-5
+    lr = args.learning_rate if args.learning_rate is not None else (1e-3 if distr_class is BezierCDF else 5e-5)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    num_iter = 6000
-    num_grid_points = 200
     torch.manual_seed(0)
 
-    print("Training started.")
-    for epoch in range(num_iter):
+    progress = trange(args.num_iter, desc=f"Training {distr_class.__name__}")
+    for epoch in progress:
         optimizer.zero_grad()
         distr = model(X)
         log_prob = distr.log_prob(X)
         loss = -log_prob.sum(dim=-1).mean()
         loss.backward()
         optimizer.step()
-        if (epoch + 1) % 50 == 0:
-            print(f"Epoch {epoch + 1}/{num_iter}, Loss: {loss.item():.4f}")
-    print("Training finished.")
+        if (epoch + 1) % 10 == 0 or epoch + 1 == args.num_iter:
+            progress.set_postfix(loss=f"{loss.item():.4f}")
 
     xx, yy = np.meshgrid(
-        np.linspace(bound_low_2moons, bound_up_2moons, num_grid_points),
-        np.linspace(bound_low_2moons, bound_up_2moons, num_grid_points),
+        np.linspace(args.bound_low, args.bound_up, args.grid_points),
+        np.linspace(args.bound_low, args.bound_up, args.grid_points),
     )
     grid = torch.tensor(np.stack([xx.ravel(), yy.ravel()], axis=1), dtype=torch.float32).to(device)
 
@@ -130,7 +158,7 @@ if __name__ == "__main__":
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     axes[0].contourf(xx, yy, prob_joint, levels=30, cmap="viridis")
     axes[0].scatter(X[:, 0].cpu(), X[:, 1].cpu(), s=4, color="red", alpha=0.3)
-    axes[0].set_title("Estimated Density (PiecewiseLinearBinnedCDF)")
+    axes[0].set_title(f"Estimated Density ({distr_class.__name__})")
     axes[0].set_xlabel("x")
     axes[0].set_ylabel("y")
     print("Grid plotting finished.")
@@ -150,5 +178,9 @@ if __name__ == "__main__":
     print("Samples plot plotting finished.")
 
     fig.tight_layout()
-    fig.savefig("examples/2D_density_estimation_result.png", dpi=300, bbox_inches="tight")
-    print("Plot saved to examples/2D_density_estimation_result.png")
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(args.output, dpi=300, bbox_inches="tight")
+    print(f"Plot saved to {args.output}")
+    if args.show:
+        plt.show()
+    plt.close(fig)

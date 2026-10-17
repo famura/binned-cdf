@@ -37,7 +37,7 @@ suitable for uncertainty estimation, probabilistic prediction, and distributiona
 
 ## Implementation
 
-The `PiecewiseConstantBinnedCDF` and `PiecewiseLinearBinnedCDF` classes inherit directly from
+The `PiecewiseConstantBinnedCDF`, `PiecewiseLinearBinnedCDF`, and `BezierCDF` classes inherit directly from
 `torch.distributions.Distribution`, implementing all necessary methods plus some convenience functions.
 They support multi-dimensional batch shapes and CUDA devices.
 The bins can be initialized linearly or log-spaced.
@@ -51,14 +51,33 @@ I recommend using `PiecewiseLinearBinnedCDF` for most applications.
 ```python
 from binned_cdf import PiecewiseLinearBinnedCDF
 
+# logits = ... some model output
 distr = PiecewiseLinearBinnedCDF(
     logits=logits,  # shape: (*batch_shape, num_bins)
     bound_low=-5,  # adapt to your data
     bound_up=7,  # adapt to your data
     log_spacing=True,  # if False, linear spacing is used
     normalization_method="sigmoid",  # "sigmoid" or "softmax"
+    validate_args=None,  # None uses PyTorch's default argument validation; or set True/False
 )
+# ... use it like any other torch.distribution.Distribution
+```
 
+This package also provides the more esoteric `BezierCDF`.
+
+```python
+from binned_cdf import BezierCDF
+
+# logits_y, logits_x = ... model outputs with the same floating dtype/device and broadcastable batch shapes
+# Degrees may differ; omit logits_x or pass None for fixed horizontal spacing.
+distr = BezierCDF(
+    logits_y=logits_y,  # vertical increments; shape: (*batch_shape_y, degree_y)
+    logits_x=logits_x,  # horizontal increments; shape: (*batch_shape_x, degree_x)
+    bound_low=-2,  # finite lower support bound; adapt to your data
+    bound_up=2,  # finite upper support bound; must exceed bound_low
+    normalization_method="softmax",  # "softmax" or "sigmoid", applied to both axes
+    validate_args=None,  # None uses PyTorch's default argument validation; or set True/False
+)
 # ... use it like any other torch.distribution.Distribution
 ```
 
