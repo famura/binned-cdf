@@ -1,4 +1,5 @@
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -61,8 +62,16 @@ class DensityNet(torch.nn.Module):
         features = self.shared(x)
         logits = self.head(features)
         logits = logits.reshape(*logits.shape[:-1], 2, self.num_bins)
+        extra_init_kwargs: dict[str, Any] = {}
+        if self.distr_class is BezierCDF:
+            # Split the bins between the vertical and horizontal control-point increments.
+            logits, extra_init_kwargs["logits_x"] = logits.chunk(2, dim=-1)
         return self.distr_class(
-            logits, bound_low=self.bound_low, bound_up=self.bound_up, normalization_method=self.normalization_method
+            logits,
+            bound_low=self.bound_low,
+            bound_up=self.bound_up,
+            normalization_method=self.normalization_method,
+            **extra_init_kwargs,
         )
 
 
@@ -72,8 +81,10 @@ if __name__ == "__main__":
     bound_low_2moons = -1.5  # prior knowledge about the dataset
     bound_up_2moons = 2.5  # prior knowledge about the dataset
     distr_class: NewDistributionType = PiecewiseLinearBinnedCDF
-    num_bins = 100
+    num_bins = 50
+    out_path = Path(__file__).parent / "results"
     normalization_method: Literal["softmax", "sigmoid"] = "softmax" if distr_class == BezierCDF else "sigmoid"
+    num_iter = 6000
 
     # Create ground truth data.
     X, _ = make_moons(n_samples=1500, noise=0.1)
@@ -95,7 +106,6 @@ if __name__ == "__main__":
     model = model.to(device)
     lr = 1e-3 if distr_class == BezierCDF else 5e-5
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    num_iter = 6000
     num_grid_points = 200
     torch.manual_seed(0)
 
@@ -150,5 +160,5 @@ if __name__ == "__main__":
     print("Samples plot plotting finished.")
 
     fig.tight_layout()
-    fig.savefig("examples/2D_density_estimation_result.png", dpi=300, bbox_inches="tight")
-    print("Plot saved to examples/2D_density_estimation_result.png")
+    fig.savefig(out_path / "2D_density_estimation_result.png", dpi=300, bbox_inches="tight")
+    print(f"Plot saved to {out_path / '2D_density_estimation_result.png'}")

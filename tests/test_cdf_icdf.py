@@ -39,7 +39,12 @@ def test_cdf_random_logits(
     logits = logit_scale * torch.randn((num_bins,)) if batch_size is None else torch.randn(batch_size, num_bins)
     logits = logits.to(device)
 
-    distr = distr_class(logits, bound_low, bound_up, normalization_method=normalization_method)
+    extra_init_kwargs: dict[str, Any] = {}
+    if distr_class is BezierCDF:
+        logits, extra_init_kwargs["logits_x"] = logits.chunk(2, dim=-1)
+    distr = distr_class(
+        logits, bound_low=bound_low, bound_up=bound_up, normalization_method=normalization_method, **extra_init_kwargs
+    )
 
     # Evaluate the CDF at the bounds.
     cdf_low = distr.cdf(torch.tensor(bound_low))
@@ -105,7 +110,10 @@ def test_sampling_and_cdf_consistency(
 
     # Create random distribution and sample from it.
     logits = torch.randn(distr_batch_size, num_bins, device=device)
-    distr = distr_class(logits, bound_low, bound_up)
+    extra_init_kwargs: dict[str, Any] = {}
+    if distr_class is BezierCDF:
+        logits, extra_init_kwargs["logits_x"] = logits.chunk(2, dim=-1)
+    distr = distr_class(logits, bound_low=bound_low, bound_up=bound_up, **extra_init_kwargs)
     sample_shape = (num_samples,) if sample_batch_size is None else (sample_batch_size, num_samples)
     samples = distr.sample(sample_shape)
     assert samples.device == device
@@ -123,8 +131,9 @@ def test_sampling_and_cdf_consistency(
         batch_samples = samples.squeeze(-1) if distr_batch_size == 1 else samples[..., batch_idx]
 
         # Create a single-distribution version for easier CDF evaluation.
-        single_logits = distr.logits[batch_idx : batch_idx + 1]  # Keep batch dimension of size 1
-        single_distr = distr_class(single_logits, bound_low, bound_up)
+        single_logits = logits[batch_idx : batch_idx + 1]  # Keep batch dimension of size 1
+        single_extra_init_kwargs = {key: value[batch_idx : batch_idx + 1] for key, value in extra_init_kwargs.items()}
+        single_distr = distr_class(single_logits, bound_low=bound_low, bound_up=bound_up, **single_extra_init_kwargs)
         theoretical_cdf = single_distr.cdf(test_points).squeeze(0)  # remove batch dimension
 
         # Store for plotting (use the first distribution).
@@ -197,7 +206,10 @@ def test_icdf_random_quantiles(
     quantiles = torch.rand(num_quantiles, device=device)
 
     # Compute ICDF.
-    distr = distr_class(logits, bound_low, bound_up)
+    extra_init_kwargs: dict[str, Any] = {}
+    if distr_class is BezierCDF:
+        logits, extra_init_kwargs["logits_x"] = logits.chunk(2, dim=-1)
+    distr = distr_class(logits, bound_low=bound_low, bound_up=bound_up, **extra_init_kwargs)
     if batch_size is not None:
         # For batched distributions, expand quantiles to (num_quantiles, *batch_shape)
         quantiles = quantiles.unsqueeze(-1).expand(num_quantiles, batch_size)
@@ -245,7 +257,9 @@ def test_icdf_fixed_quantiles(
     # Create a distribution with random logits.
     logits = torch.randn(num_bins, device=device)
     extra_init_kwargs: dict[str, Any] = {"log_spacing": log_spacing} if distr_class is PiecewiseLinearBinnedCDF else {}
-    distr = distr_class(logits, bound_low, bound_up, **extra_init_kwargs)
+    if distr_class is BezierCDF:
+        logits, extra_init_kwargs["logits_x"] = logits.chunk(2, dim=-1)
+    distr = distr_class(logits, bound_low=bound_low, bound_up=bound_up, **extra_init_kwargs)
 
     # Test fixed quantiles with both linear and log spacing for the quantiles themselves.
     quantiles = torch.tensor([0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99], device=device)
@@ -360,8 +374,9 @@ def test_icdf_fixed_quantiles(
 def test_bezier_icdf_newton_bisection_consistency(degree: int, batch_size: int | None):
     """Test that the Newton and bisection methods for ICDF yield consistent results."""
     torch.manual_seed(42)
-    logits = torch.randn((degree,)) if batch_size is None else torch.randn(batch_size, degree)
-    distr = BezierCDF(logits, bound_low=-5, bound_up=5)
+    logits = torch.randn((2 * degree,)) if batch_size is None else torch.randn(batch_size, 2 * degree)
+    logits_y, logits_x = logits.chunk(2, dim=-1)
+    distr = BezierCDF(logits_y, logits_x, bound_low=-5, bound_up=5)
 
     quantiles = torch.tensor([0.01, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99])
     if batch_size is not None:
@@ -389,3 +404,53 @@ def test_bezier_icdf_newton_bisection_consistency(degree: int, batch_size: int |
         atol=1e-3,
         msg="Bisection round-trip cdf(icdf(q)) != q",
     )
+
+
+def test_bezier_unequal_axes():
+    """Check unequal axis degrees, broadcasting, inverse gradients, and equivalence to an affine horizontal axis."""
+    # Share the degree-four horizontal axis across two degree-three CDFs.
+    logits_x = torch.tensor([0.5, -0.4, 0.2, -0.1], dtype=torch.float64, requires_grad=True)
+
+    logits_y = torch.tensor([[0.2, -0.1, 0.4], [-0.3, 0.1, 0.2]], dtype=torch.float64, requires_grad=True)
+    distr = BezierCDF(logits_y, logits_x, bound_low=0, bound_up=1)
+
+    # The evaluation outputs have shape (3, 2).
+    values = torch.tensor([[0.13], [0.41], [0.86]], dtype=torch.float64, requires_grad=True)
+
+    def _evaluate(
+        logits_y: torch.Tensor, logits_x: torch.Tensor, eval_points: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        distr = BezierCDF(logits_y, logits_x, bound_low=0, bound_up=1)
+        return distr.cdf(eval_points), distr.log_prob(eval_points), distr.icdf(eval_points)
+
+    # Check that the gradients are correctly computed for the BezierCDF with unequal axes.
+    assert torch.autograd.gradcheck(_evaluate, inputs=(logits_y, logits_x, values))
+
+    # Check that CDF->ICDF round-trip returns the original values.
+    torch.testing.assert_close(distr.icdf(distr.cdf(values)), values.expand(3, 2))
+
+    # Check that the CDF and ICDF correctly handle the endpoints.
+    endpoints = torch.tensor([[0.0], [1.0]], dtype=torch.float64)
+    torch.testing.assert_close(distr.cdf(endpoints), endpoints.expand(2, 2))
+    torch.testing.assert_close(distr.icdf(endpoints), endpoints.expand(2, 2))
+
+    # Check that the shared input points collect gradients from both distributions (batch_size = 2), so compare against
+    # the sum of their PDFs.
+    cdf_gradient = torch.autograd.grad(distr.cdf(values).sum(), inputs=values, retain_graph=True)[0]
+    torch.testing.assert_close(cdf_gradient, distr.prob(values).sum(dim=-1, keepdim=True))
+
+    # Check that the reparameterized samples have the correct shape and that their gradients are finite and non-zero.
+    samples = distr.rsample((2, 3))
+    assert samples.shape == (2, 3, 2)
+    for gradient in torch.autograd.grad(samples.sum(), inputs=(logits_x, logits_y)):
+        assert torch.isfinite(gradient).all() and gradient.abs().sum() > 0
+
+    # Check that uniform horizontal increments represent the same affine map at any degree.
+    baseline = BezierCDF(logits_y.detach(), logits_y.new_zeros(1), 0, 1)
+    uniform_x = BezierCDF(logits_y.detach(), torch.zeros_like(logits_x), 0, 1)
+    torch.testing.assert_close(uniform_x.prob(values), baseline.prob(values))
+    torch.testing.assert_close(uniform_x.cdf(values), baseline.cdf(values))
+    torch.testing.assert_close(uniform_x.icdf(values), baseline.icdf(values))
+    torch.testing.assert_close(uniform_x.mean, baseline.mean)
+    torch.testing.assert_close(uniform_x.variance, baseline.variance)
+    torch.testing.assert_close(uniform_x.entropy(32), baseline.entropy(32))

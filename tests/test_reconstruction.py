@@ -77,10 +77,13 @@ def test_distribution_reconstruction_bezier(
     target_probs = torch.exp(target_distr.log_prob(eval_points))
 
     # With softmax normalization, logits = log(steps) up to a constant.
-    logits = torch.log(target_probs + 1e-8)
+    logits_y = torch.log(target_probs + 1e-8)
+    logits_x = logits_y.new_zeros(1)
 
     # Create BezierCDF distribution, and get mean and variance.
-    distr = BezierCDF(logits=logits, bound_low=bound_low, bound_up=bound_up, normalization_method=normalization_method)
+    distr = BezierCDF(
+        logits_y, logits_x, bound_low=bound_low, bound_up=bound_up, normalization_method=normalization_method
+    )
     reconstructed_mean = distr.mean.item()
     reconstructed_var = distr.variance.item()
     reconstructed_std = math.sqrt(reconstructed_var)
