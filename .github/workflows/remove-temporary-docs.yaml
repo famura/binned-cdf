@@ -15,7 +15,7 @@ jobs:
 
         steps:
             - name: Check out repository
-              uses: actions/checkout@v6
+              uses: actions/checkout@v7
 
             - name: Set up uv
               uses: astral-sh/setup-uv@v7
@@ -30,7 +30,7 @@ jobs:
                   uv run --only-dev mike delete --push ${VERSION}
 
             - name: Remove docs comment
-              uses: marocchino/sticky-pull-request-comment@v3.0.3
+              uses: marocchino/sticky-pull-request-comment@v3.0.5
               with:
                   delete: true
                   header: docs-comment

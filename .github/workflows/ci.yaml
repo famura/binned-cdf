@@ -21,7 +21,7 @@ jobs:
 
         steps:
             - name: Check out repository
-              uses: actions/checkout@v6
+              uses: actions/checkout@v7
 
             - name: Set up uv
               uses: astral-sh/setup-uv@v7
@@ -46,7 +46,7 @@ jobs:
 
             - name: Add docs comment
               if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
-              uses: marocchino/sticky-pull-request-comment@v3.0.3
+              uses: marocchino/sticky-pull-request-comment@v3.0.5
               with:
                   header: docs-comment
                   message: |
@@ -68,7 +68,7 @@ jobs:
 
         steps:
             - name: Check out repository
-              uses: actions/checkout@v6
+              uses: actions/checkout@v7
 
             - name: Set up uv
               uses: astral-sh/setup-uv@v7
